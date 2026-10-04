@@ -301,6 +301,67 @@ return function(window,home,gameName)
 end
 
 end)()
+local createHubTelemetry=(function()
+-- One lightweight HUD for both adapters. Delay is frame time, not a second ping value.
+return function(Window, tab, gameName)
+    local run=game:GetService("RunService")
+    local player=game:GetService("Players").LocalPlayer
+    local stats=game:GetService("Stats")
+    local state={Enabled=false,FPS=true,Ping=true,Delay=true,Game=true,Position="Top right",Scale=100,Opacity=15,Color=Color3.new(1,1,1)}
+    local env=getgenv()
+    env.BloxSenseWatermarkPreferences=env.BloxSenseWatermarkPreferences or {}
+    local saved=env.BloxSenseWatermarkPreferences[gameName]
+    if saved then for key,value in pairs(saved)do if typeof(state[key])==typeof(value)then state[key]=value end end end
+    env.BloxSenseWatermarkPreferences[gameName]=state
+    local gui=Instance.new("ScreenGui")
+    gui.Name="BloxSenseWatermark";gui.ResetOnSpawn=false;gui.DisplayOrder=110;gui.Parent=player:WaitForChild("PlayerGui")
+    local panel=Instance.new("TextLabel")
+    panel.Name="Watermark";panel.AutomaticSize=Enum.AutomaticSize.XY;panel.Size=UDim2.fromOffset(0,0)
+    panel.BackgroundColor3=Color3.fromRGB(15,15,17);panel.BorderSizePixel=0
+    panel.Font=Enum.Font.GothamMedium;panel.TextSize=12;panel.TextColor3=state.Color;panel.Text="BloxSense"
+    panel.Parent=gui
+    local corner=Instance.new("UICorner");corner.CornerRadius=UDim.new(0,8);corner.Parent=panel
+    local stroke=Instance.new("UIStroke");stroke.ApplyStrokeMode=Enum.ApplyStrokeMode.Border;stroke.Color=Color3.fromRGB(65,65,70);stroke.Thickness=1;stroke.Parent=panel
+    local pad=Instance.new("UIPadding");pad.PaddingLeft=UDim.new(0,12);pad.PaddingRight=UDim.new(0,12);pad.PaddingTop=UDim.new(0,9);pad.PaddingBottom=UDim.new(0,9);pad.Parent=panel
+    local scale=Instance.new("UIScale");scale.Parent=panel
+    local function style()
+        gui.Enabled=state.Enabled
+        local right=state.Position:find("right")~=nil;local bottom=state.Position:find("Bottom")~=nil
+        panel.AnchorPoint=Vector2.new(right and 1 or 0,bottom and 1 or 0)
+        panel.Position=UDim2.new(right and 1 or 0,right and -16 or 16,bottom and 1 or 0,bottom and -16 or 16)
+        panel.BackgroundTransparency=state.Opacity/100;panel.TextColor3=state.Color;scale.Scale=state.Scale/100
+    end
+    tab:CreateSection({name="WATERMARK"})
+    for _,entry in ipairs({{"Enabled","Show watermark"},{"FPS","FPS"},{"Ping","Network ping"},{"Delay","Frame delay (ms)"},{"Game","Game name"}})do
+        local key=entry[1]
+        tab:CreateToggle({name=entry[2],flag="BloxSenseWatermark"..key,value=state[key],callback=function(value)state[key]=value;style()end})
+    end
+    tab:CreateDropdown({name="Position",flag="BloxSenseWatermarkPosition",options={"Top right","Top left","Bottom right","Bottom left"},value={state.Position},multiSelect=false,
+        callback=function(value)state.Position=type(value)=="table" and value[1] or value;style()end})
+    tab:CreateSlider({name="Scale (%)",flag="BloxSenseWatermarkScale",range={70,150},value=state.Scale,increment=5,callback=function(value)state.Scale=value;style()end})
+    tab:CreateSlider({name="Background transparency (%)",flag="BloxSenseWatermarkOpacity",range={0,100},value=state.Opacity,increment=1,callback=function(value)state.Opacity=value;style()end})
+    tab:CreateColorPicker({name="Text color",flag="BloxSenseWatermarkColor",color=state.Color,callback=function(value)state.Color=value;style()end})
+    local elapsed,frames,ping=0,0,nil
+    local connection=run.RenderStepped:Connect(function(dt)
+        if not state.Enabled then elapsed,frames=0,0;return end
+        elapsed+=dt;frames+=1
+        if elapsed<0.5 then return end
+        if state.Ping then
+            local ok,value=pcall(function()return stats.Network.ServerStatsItem["Data Ping"]:GetValue()end)
+            ping=ok and type(value)=="number" and value or nil
+        end
+        local segments={"BloxSense"}
+        if state.Game then table.insert(segments,gameName)end
+        if state.FPS then table.insert(segments,string.format("%d FPS",math.floor(frames/elapsed+0.5)))end
+        if state.Ping then table.insert(segments,ping and string.format("%.0f ms ping",ping) or "Ping N/A")end
+        if state.Delay then table.insert(segments,string.format("%.1f ms frame",elapsed/frames*1000))end
+        panel.Text=table.concat(segments,"  ·  ");elapsed,frames=0,0
+    end)
+    style()
+    return {State=state,Gui=gui,Refresh=style,Destroy=function()connection:Disconnect();gui:Destroy()end}
+end
+
+end)()
 adapters.bloxstrike = function()
 local Modules = {}
 
@@ -489,7 +550,7 @@ return function(context)
         if type(health) == "number" then return health > 0 end
         return not humanoid or humanoid.Health > 0
     end
-    function module:Cast(origin, direction)
+    function module:Cast(origin, direction, physicalOnly)
         local ignore = table.clone(getIgnore() or {})
         if player.Character then table.insert(ignore, player.Character) end
         if workspace.CurrentCamera then table.insert(ignore, workspace.CurrentCamera) end
@@ -498,7 +559,7 @@ return function(context)
         params.CollisionGroup = "Bullet"
         local function expanded(limit)
             local hitboxes = context.Modules.hitboxes
-            return hitboxes and hitboxes:Cast(origin, direction, limit)
+            return not physicalOnly and hitboxes and hitboxes:Cast(origin, direction, limit) or nil
         end
         for _ = 1, 20 do
             params.FilterDescendantsInstances = ignore
@@ -554,47 +615,40 @@ return function(context)
     function module:ClosestEnemy(allowWalls, accept)
         local camera = workspace.CurrentCamera
         if not camera or not context.IsGameplayActive() then return nil end
-        local center = camera.ViewportSize * 0.5
-        local best, nearest = nil, self.Radius
-        local ownCharacter = player.Character
-        for _, p in ipairs(players:GetPlayers()) do
-            if not self:IsEnemy(p) or not self:IsAlive(p) then continue end
-            local character = p.Character
-            if not character then continue end
-            for partName, allowed in pairs(self.AllowedParts) do
-                if not allowed then continue end
-                local part = character:FindFirstChild(partName)
-                if not part or not part:IsA("BasePart") then continue end
-                local position, onScreen = camera:WorldToViewportPoint(part.Position)
+        local center=camera.ViewportSize*0.5
+        local ray=camera:ViewportPointToRay(center.X,center.Y)
+        local origin=camera.CFrame.Position
+        local candidates={}
+        local hitboxes=context.Modules.hitboxes
+        for _,p in ipairs(players:GetPlayers())do
+            if not self:IsEnemy(p) or not self:IsAlive(p)then continue end
+            local character=p.Character
+            for partName,enabled in pairs(self.AllowedParts)do
+                local part=enabled and character:FindFirstChild(partName)
+                if not part or not part:IsA("BasePart")then continue end
+                local offset=part.Position-origin
+                if offset.Magnitude>self.MaxDistance then continue end
+                local screen,onScreen=camera:WorldToViewportPoint(part.Position)
                 if not onScreen then continue end
-                local pixels = (Vector2.new(position.X, position.Y) - center).Magnitude
-                local hitboxes = context.Modules.hitboxes
-                if hitboxes and hitboxes.Enabled then
-                    local ray = camera:ViewportPointToRay(center.X, center.Y)
-                    if hitboxes:IntersectPart(part, ray.Origin, ray.Direction * self.MaxDistance) then pixels = 0 end
-                end
-                if pixels > nearest then continue end
-                local offset = part.Position - camera.CFrame.Position
-                if offset.Magnitude > self.MaxDistance then continue end
-                if not allowWalls then
-                    local hit = self:Cast(camera.CFrame.Position, offset)
-                    if hit and hit.instance then
-                        if ownCharacter and hit.instance:IsDescendantOf(ownCharacter) then
-                            -- Your own limbs (especially while jumping) can cross
-                            -- the camera ray; self-occlusion must never reject a target.
-                        elseif not hit.instance:IsDescendantOf(character) then
-                            continue
-                        end
-                    end
-                end
-                local candidate = { Player = p, Part = part }
-                if not accept or accept(candidate) then
-                    nearest = pixels
-                    best = candidate
+                local pixels=(Vector2.new(screen.X,screen.Y)-center).Magnitude
+                if hitboxes and hitboxes.Enabled and hitboxes:IntersectPart(part,ray.Origin,ray.Direction*self.MaxDistance)then pixels=0 end
+                if pixels<=self.Radius then
+                    table.insert(candidates,{Player=p,Part=part,Score=pixels+offset.Magnitude*0.0001})
                 end
             end
         end
-        return best
+        table.sort(candidates,function(a,b)return a.Score<b.Score end)
+        -- Test the nearest candidates first; stop at the first valid shot.
+        for index,candidate in ipairs(candidates)do
+            if index>8 then break end
+            if not allowWalls then
+                -- Visibility is physical-only: avoid recursively scanning every expanded region.
+                local hit=self:Cast(origin,candidate.Part.Position-origin,true)
+                if hit and hit.instance and not hit.instance:IsDescendantOf(candidate.Player.Character)then continue end
+            end
+            if not accept or accept(candidate)then return candidate end
+        end
+        return nil
     end
     return module
 end
@@ -701,7 +755,9 @@ return function(context)
         since, lastShot = 0, 0
         self.Status = self.Enabled and "Ready" or "Off"
         if self.Enabled then
-            connection = run.Heartbeat:Connect(function()
+            local elapsed=0
+            connection = run.Heartbeat:Connect(function(dt)
+                elapsed+=dt;if elapsed<1/60 then return end;elapsed%=1/60
                 local ok, err = pcall(self.Step, self, os.clock())
                 if not ok then self.Status = "Error: " .. tostring(err) end
             end)
@@ -744,6 +800,7 @@ return function(context)
     local module = { Enabled = false, ShowFOV = true, Redirects = 0, Wallbang = false }
     local previous, wrapper
     local fovGui, fovCircle
+    local fovColor=Color3.new(1,1,1)
     local function ensureFov()
         if fovGui and fovGui.Parent then return end
         local pg = player:FindFirstChildOfClass("PlayerGui")
@@ -768,7 +825,7 @@ return function(context)
         local stroke = Instance.new("UIStroke")
         stroke.Thickness = 1.5
         stroke.Transparency = 0.15
-        stroke.Color = Color3.fromRGB(255, 255, 255)
+        stroke.Color = fovColor
         stroke.Parent = fovCircle
     end
     local function updateFov()
@@ -776,6 +833,7 @@ return function(context)
         if not fovGui or not fovCircle then return end
         local radius = context.Targeting.Radius or 120
         fovCircle.Size = UDim2.fromOffset(math.max(radius * 2, 2), math.max(radius * 2, 2))
+        fovCircle:FindFirstChildOfClass("UIStroke").Color=fovColor
         fovGui.Enabled = module.Enabled and module.ShowFOV
     end
     -- Match the game's material allowances, counting real entry/exit thickness.
@@ -920,6 +978,7 @@ return function(context)
         Title = "Show FOV circle", Description = "Radius visualizer centered on the crosshair.", Default = true,
     })
     fovToggle:OnChanged(function() module.ShowFOV = fovToggle.Value == true; updateFov() end)
+    selectionTab.Raw:CreateColorPicker({name="Radius color",flag="BloxSenseAimRadiusColor",color=fovColor,callback=function(value)fovColor=value;updateFov()end})
     ensureFov()
     updateFov()
     function module:Destroy()
@@ -1041,10 +1100,10 @@ return function(context)
     local players = game:GetService("Players")
     local player = players.LocalPlayer
     local run = game:GetService("RunService")
-    local module = {Enabled = false, Show = false, Scale = 2, Opacity = 20, ThroughWalls = true,
+    local module = {Enabled = false, Show = false, Scale = 2, Size = 4, Sizing = "Studs", Color = Color3.new(1,1,1), TeamColors = true, Opacity = 20, ThroughWalls = true,
         MaxDistance = 500, PauseSpectating = true, Parts = {Head = true}, Modified = 0, Drawn = 0}
     local bullet = require(game.ReplicatedStorage.Components.Weapon.Classes.Bullet)
-    type HitboxRecord = {Box: BoxHandleAdornment?}
+    type HitboxRecord = {Box: BoxHandleAdornment?, Owner: Player?}
     local records: {[BasePart]: HitboxRecord} = {}
     local connection
     local gui = Instance.new("ScreenGui")
@@ -1067,14 +1126,21 @@ return function(context)
     end
     function module:IsEligible(part)
         if not part.Parent or not self.Parts[part.Name] then return false end
-        local owner = context.Targeting:PlayerFromHit(part)
+        local record=records[part]
+        local owner = record and record.Owner or context.Targeting:PlayerFromHit(part)
+        if owner and part.Parent~=owner.Character then return false end
         return context.Targeting:IsEnemy(owner) and context.Targeting:IsAlive(owner)
             and (part.Position - workspace.CurrentCamera.CFrame.Position).Magnitude <= self.MaxDistance
+    end
+    function module:RegionSize(part)
+        if self.Sizing=="Multiplier"then return part.Size*math.clamp(self.Scale,1,4)end
+        local size=math.clamp(self.Size,1,100)
+        return Vector3.new(size,size,size)
     end
     -- Oriented-box intersection in part space. The visible mesh and physics stay unchanged.
     function module:IntersectPart(part, origin, direction)
         if not self.Enabled or not records[part] or direction.Magnitude < 0.00001 then return nil end
-        local cf, half = part.CFrame, part.Size * math.clamp(self.Scale, 1, 4) * 0.5
+        local cf, half = part.CFrame, self:RegionSize(part) * 0.5
         local p, d = cf:PointToObjectSpace(origin), cf:VectorToObjectSpace(direction)
         local near, far, normal = 0, 1, -direction.Unit
         for _, axis in ipairs({"X", "Y", "Z"}) do
@@ -1109,9 +1175,10 @@ return function(context)
         end
         return best
     end
-    function module:ApplyPart(part, color)
+    function module:ApplyPart(part, color, owner)
         local record = records[part]
         if not record then record = {}; records[part] = record end
+        record.Owner=owner
         if self.Show and not record.Box then
             local box = Instance.new("BoxHandleAdornment")
             box.Name = "Hitbox_" .. part.Name
@@ -1121,13 +1188,13 @@ return function(context)
             record.Box = box
         end
         if record.Box then
-            record.Box.Size = part.Size * (self.Enabled and math.clamp(self.Scale, 1, 4) or 1)
-            record.Box.Color3 = color
+            record.Box.Size = self.Enabled and self:RegionSize(part) or part.Size
+            record.Box.Color3 = self.TeamColors and color or self.Color
             record.Box.Transparency = 1 - self.Opacity / 100
             record.Box.AlwaysOnTop = self.ThroughWalls
             record.Box.Visible = self.Show
         end
-        return self.Enabled and self.Scale > 1, self.Show
+        return self.Enabled, self.Show
     end
     function module:Update()
         if self:IsPaused() or (not self.Enabled and not self.Show) then self:RestoreAll(); return end
@@ -1144,7 +1211,7 @@ return function(context)
                 local part = character:FindFirstChild(name)
                 if not part or not part:IsA("BasePart") or not self:IsEligible(part) then continue end
                 seen[part] = true
-                local changed, shown = self:ApplyPart(part, color)
+                local changed, shown = self:ApplyPart(part, color, other)
                 if changed then self.Modified += 1 end
                 if shown then self.Drawn += 1 end
             end
@@ -1196,6 +1263,10 @@ return function(context)
         Description = "Invisible hit regions; character models keep their normal size. Server acceptance is unverified.", Default = false})
     module.Toggle = toggle
     toggle:OnChanged(function() module.Enabled = toggle.Value; module:Refresh() end)
+    context.Tab.Raw:CreateDropdown({name="Sizing",flag="BloxSenseRegionSizing",options={"Studs","Multiplier"},value={"Studs"},multiSelect=false,
+        callback=function(value)module.Sizing=type(value)=="table" and value[1] or value;module:Update()end})
+    context.Tab:AddSlider("BloxSenseRegionSize",{Title="Size (studs)",Default=4,Min=1,Max=100,Rounding=0,
+        Callback=function(value)module.Size=value;module:Update()end})
     context.Tab:AddSlider("BloxSenseHitboxScale", {Title = "Size multiplier", Default = 2,
         Min = 1, Max = 4, Rounding = 1, Callback = function(value) module.Scale = value; module:Update() end})
     local parts = context.Tab:AddDropdown("BloxSenseHitboxParts", {Title = "Body parts",
@@ -1220,6 +1291,8 @@ return function(context)
         Min = 5, Max = 80, Rounding = 0, Callback = function(value) module.Opacity = value; module:Update() end})
     local walls = display:AddToggle("BloxSenseHitboxWalls", {Title = "Show through walls", Default = true})
     walls:OnChanged(function() module.ThroughWalls = walls.Value; module:Update() end)
+    display.Raw:CreateToggle({name="Use team colors",flag="BloxSenseRegionTeamColors",value=true,callback=function(value)module.TeamColors=value;module:Update()end})
+    display.Raw:CreateColorPicker({name="Region color",flag="BloxSenseRegionColor",color=module.Color,callback=function(value)module.Color=value;module:Update()end})
     display:AddButton({Title = "Hitbox status", Callback = function()
         context.Notify("Hitboxes", module.Modified .. " enlarged · " .. module.Drawn .. " displayed locally")
     end})
@@ -1569,6 +1642,9 @@ return function(context)
     local module = { Enabled = false, Selections = {}, KnifeOverride = nil, AppliedParts = 0, Status = "Idle", Revision = 0 }
     local snapshots, replacements = {}, {}
     local connection, currentModel, currentKey, lastEquipped
+    local retryKey,retryAfter=nil,0
+    local appearanceCache={}
+    local uiArtKey,uiArt=nil,nil
     local knifeSwap = nil
     local inventory = require(storage.Controllers.InventoryController)
     local viewmodelClass = require(storage.Classes.WeaponComponent.Classes.Viewmodel)
@@ -1716,12 +1792,15 @@ return function(context)
         return nil
     end
     function module:GetAppearances(weapon, skin)
+        local key=weapon.."|"..skin
+        if appearanceCache[key]then return appearanceCache[key]end
         local folder = self:GetTextureFolder(weapon, skin)
         if not folder then return nil end
         local appearances = {}
         for _, surface in ipairs(folder:GetChildren()) do
             if surface:IsA("SurfaceAppearance") then appearances[surface.Name] = surface end
         end
+        if next(appearances)then appearanceCache[key]=appearances end
         return appearances
     end
     function module:PaintParts(parts, appearances)
@@ -1836,8 +1915,12 @@ return function(context)
             setUIProperty(child(host, "Melee"), "Image", icon)
             setUIProperty(child(host, "WeaponName"), "Text", selection.Weapon)
         end
-        local info = library.GetSkinInformation(selection.Weapon, selection.Skin)
-        local art = info and library.GetItemIconImage(info, {Name = selection.Weapon, Float = 0})
+        local artKey=selection.Weapon.."|"..selection.Skin
+        if uiArtKey~=artKey then
+            local info=library.GetSkinInformation(selection.Weapon,selection.Skin)
+            uiArt=info and library.GetItemIconImage(info,{Name=selection.Weapon,Float=0});uiArtKey=artKey
+        end
+        local art=uiArt
         if type(art) == "number" then art = "rbxassetid://" .. art end
         for _, team in ipairs({ "CT", "T" }) do
             local slot = child(main, "Menu", "Loadout", "Container", "Teams", team, "Equipments", "Melee", "Container", "Icon")
@@ -1873,7 +1956,12 @@ return function(context)
         end
         if KNIVES[equipped] and KNIVES[weapon] then
             if not knifeSwap or currentKey ~= weapon .. "|" .. skin or knifeSwap.replacement.Model ~= model then
-                self:ApplyKnifeModel(model, weapon, skin)
+                local key=weapon.."|"..skin
+                if retryKey~=key or os.clock()>=retryAfter then
+                    retryKey=key;retryAfter=os.clock()+2
+                    local applied=self:ApplyKnifeModel(model,weapon,skin)
+                    if applied then retryKey=nil;retryAfter=0 end
+                end
             end
         else
             local key = model:GetFullName() .. "|" .. weapon .. "|" .. skin
@@ -2535,6 +2623,7 @@ local function columns(tab)
     local right = row:CreateGroup({direction = "column"})
     -- Gen2 columns can host keybind elements but omit the convenience method.
     for _, column in ipairs({left, right}) do
+        function column:CreateColorPicker(options) return self:_add("colorpicker", options) end
         if not column.CreateKeybind then
             function column:CreateKeybind(options) return self:_add("keybind", options) end
         end
@@ -2692,9 +2781,10 @@ end
 local espOptions = {
     Mode = "Toggle", Key = Enum.KeyCode.LeftAlt, Names = true, Health = true,
     Distance = true, Weapons = true, EnemiesOnly = false, WhileSpectating = false,
-    Chams = true, Outline = true, ThroughWalls = true, FillOpacity = 25,
+    Chams = true, Outline = true, ThroughWalls = true, FillOpacity = 25, RefreshHz = 20, TextSize = 13, TextOutline = 30,
 }
 local weaponIcons = {}
+local weaponCache=setmetatable({},{__mode="k"})
 local http = game:GetService("HttpService")
 local getWeaponProperties = require(game.ReplicatedStorage.Components.Common.GetWeaponProperties)
 local spectateController
@@ -2705,15 +2795,18 @@ pcall(function()
 end)
 local function weaponInfo(otherPlayer)
     local raw = otherPlayer:GetAttribute("CurrentEquipped")
+    local cached=weaponCache[otherPlayer]
+    if cached and cached.Raw==raw then return cached.Name,cached.Icon end
     local ok, item = pcall(http.JSONDecode, http, type(raw) == "string" and raw or "{}")
     local name = ok and type(item) == "table" and item.Name
-    if type(name) ~= "string" or name == "" then return "", "" end
+    if type(name) ~= "string" or name == "" then weaponCache[otherPlayer]={Raw=raw,Name="",Icon=""};return "", "" end
     if weaponIcons[name] == nil then
         local success, properties = gameCall(getWeaponProperties, name)
         local icon = success and type(properties) == "table" and properties.Icon
         if type(icon) == "number" or (type(icon) == "string" and icon:match("^%d+$")) then icon = "rbxassetid://" .. icon end
         weaponIcons[name] = type(icon) == "string" and icon or ""
     end
+    weaponCache[otherPlayer]={Raw=raw,Name=name,Icon=weaponIcons[name]}
     return name, weaponIcons[name]
 end
 local function createESP(otherPlayer, character, root)
@@ -2825,6 +2918,10 @@ local function updateESP()
         data.highlight.DepthMode = espOptions.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
         if not visible then continue end
         data.nameLabel.TextColor3 = color
+        data.nameLabel.TextSize=espOptions.TextSize
+        data.distanceLabel.TextSize=math.max(9,espOptions.TextSize-2);data.weaponLabel.TextSize=math.max(9,espOptions.TextSize-2)
+        data.nameLabel.TextStrokeTransparency=espOptions.TextOutline/100
+        data.distanceLabel.TextStrokeTransparency=espOptions.TextOutline/100;data.weaponLabel.TextStrokeTransparency=espOptions.TextOutline/100
         data.nameLabel.Visible = espOptions.Names
         data.nameLabel.Text = otherPlayer.DisplayName
         data.distanceLabel.Visible = espOptions.Distance
@@ -2857,8 +2954,8 @@ local function setESPEnabled(enabled)
     local elapsed = 0
     updateConnection = RunService.Heartbeat:Connect(function(deltaTime)
         elapsed += deltaTime
-        if elapsed < 0.1 then return end
-        elapsed = 0
+        if elapsed < 1/espOptions.RefreshHz then return end
+        elapsed %= 1/espOptions.RefreshHz
         updateESP()
     end)
 end
@@ -2996,6 +3093,15 @@ for _, group in ipairs({
 end
 visualExtra:AddSlider("BloxSenseChamsOpacity", {Title = "Chams opacity (%)", Default = 25, Min = 0, Max = 100,
     Rounding = 0, Callback = function(value) espOptions.FillOpacity = value end})
+visualExtra.Raw:CreateSection({name="STYLE & PERFORMANCE"})
+for _,entry in ipairs({{"Counter-Terrorists","CT color"},{"Terrorists","T color"}})do
+    local key=entry[1]
+    visualExtra.Raw:CreateColorPicker({name=entry[2],flag="BloxSenseESPColor"..key,color=teamColors[key],callback=function(value)teamColors[key]=value end})
+end
+visualExtra.Raw:CreateColorPicker({name="Neutral color",flag="BloxSenseESPNeutralColor",color=neutralColor,callback=function(value)neutralColor=value end})
+visualExtra:AddSlider("BloxSenseESPTextSize",{Title="Text size",Default=13,Min=9,Max=20,Rounding=0,Callback=function(value)espOptions.TextSize=value end})
+visualExtra:AddSlider("BloxSenseESPTextOutline",{Title="Text outline transparency (%)",Default=30,Min=0,Max=100,Rounding=0,Callback=function(value)espOptions.TextOutline=value end})
+visualExtra:AddSlider("BloxSenseESPRefresh",{Title="Details refresh (Hz)",Default=20,Min=5,Max=60,Rounding=0,Callback=function(value)espOptions.RefreshHz=value end})
 aimMain.Raw:CreateSection({name = "MAIN"})
 addFeature("silentaim", aimMain, aimMain)
 
@@ -3036,6 +3142,7 @@ addFeature("snaplook", miscMain)
 miscMain.Raw:CreateSection({name = "VISIBILITY"})
 addFeature("flash", miscMain)
 addFeature("qol", miscExtra)
+featureModules.Telemetry=createHubTelemetry(Window,miscExtra.Raw,"Bloxstrike")
 miscExtra.Raw:CreateSection({name = "AWARENESS"})
 addFeature("radar", miscExtra)
 addFeature("spectators", miscExtra)
@@ -3077,6 +3184,8 @@ local Player = Players.LocalPlayer
 local Characters = require(RS.BAC.Characters)
 local Items = require(RS.Modules.Items)
 local env = getgenv()
+local reloadState=env.BloxSenseController and env.BloxSenseController.Game=="Assassin!" and env.BloxSenseController.State
+reloadState=reloadState and table.clone(reloadState)
 if type(env.BloxSenseCleanup) == "function" then env.BloxSenseCleanup() end
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
 local Window = Rayfield:CreateWindow({name="BloxSense Hub",subtitle="Assassin!",sidebarLayout=true,
@@ -3105,8 +3214,13 @@ end
 local S:any={Destroyed=false,ESP=true,Boxes=true,Chams=true,Health=true,Names=true,Distance=true,Weapons=true,
     ThroughWalls=true,OnlyPriority=false,ESPDistance=1200,Fill=75,HUD=true,LookWarning=false,TargetAlerts=true,
     Aim=false,AimRadius=150,AimDistance=800,AimPart="Automatic",AimScope="Assigned target",Prediction=true,PredictionMode="Adaptive",Lead=0.12,ProjectileSpeed=300,
-    ShowFOV=true,Expand=false,Scale=2,RegionPart="Head",ShowRegions=false,RegionOpacity=20,
-    Skin=false,SkinName="Basic",SkinFilter="Applicable only",SkinRarity="All rarities",FovOn=false,Fov=70,AntiAFK=false,KnifeESP=false,KnifeOwner=true,KnifeDistance=600,RoleLabels=true,Redirects=0,HookStatus="Not installed"}
+    ShowFOV=true,Expand=false,Scale=2,RegionSize=4,RegionSizing="Studs",AimHz=30,Sticky=true,RegionPart="Head",ShowRegions=false,RegionOpacity=20,
+    Skin=false,SkinName="Basic",SkinFilter="Applicable only",SkinRarity="All rarities",FovOn=false,Fov=70,AntiAFK=false,KnifeESP=false,KnifeOwner=true,KnifeDistance=600,RoleLabels=true,ESPHz=60,TextSize=12,BoxThickness=1.5,BoxOpacity=4,ESPSmooth=0,UseRoleColors=true,PlayerColor=Color3.fromRGB(91,157,255),TargetColor=Color3.fromRGB(86,229,173),ThreatColor=Color3.fromRGB(255,101,111),RegionColor=Color3.new(1,1,1),FOVColor=Color3.new(1,1,1),Redirects=0,HookStatus="Not installed"}
+if reloadState then
+    for key,value in pairs(reloadState)do
+        if key~="Destroyed" and key~="Redirects" and key~="HookStatus" and typeof(S[key])==typeof(value)then S[key]=value end
+    end
+end
 local connections,drawings,regions,projectiles,threats,skinRecords={},{},{},{},{},{}
 local cosmeticRecords,knifeDrawings={},{}
 local target,selectedAim,selectedRegion
@@ -3115,6 +3229,8 @@ local measuredSpeed
 local alertTimes={}
 local activateAimHook
 local accent=Color3.fromRGB(91,157,255)
+local playerList=Players:GetPlayers()
+local mouse=Player:GetMouse()
 local green=Color3.fromRGB(86,229,173)
 local red=Color3.fromRGB(255,101,111)
 local function notify(title,text)
@@ -3127,6 +3243,14 @@ local function intelToast(title,subtitle,p)
     pcall(function()Window:Toast({title=title,subtitle=subtitle,avatar=p and p.UserId,duration=4,position="Bottom"})end)
 end
 local function connect(signal,fn)local c=signal:Connect(fn);table.insert(connections,c);return c end
+-- Also make partial initialization reversible if a UI component fails to construct.
+env.BloxSenseCleanup=function()
+    S.Destroyed=true
+    for _,connection in ipairs(connections)do connection:Disconnect()end
+    if not Window.unloaded then Window:Unload()end
+    local overlay=Player.PlayerGui:FindFirstChild("BloxSenseAssassin");if overlay then overlay:Destroy()end
+    env.BloxSenseCleanup=nil
+end
 local function make(class,props,parent)
     local object=Instance.new(class)
     if object:IsA("GuiObject") and parent and parent:IsA("GuiObject")then object.ZIndex=parent.ZIndex+1 end
@@ -3152,9 +3276,16 @@ local function dropdown(tab,key,name,options)
     return tab:CreateDropdown({name=name,flag="Assassin_"..key,value={S[key]},options=options,multiSelect=false,
         callback=function(v)S[key]=type(v)=="table" and v[1] or v;preparedThrow=nil end})
 end
+connect(Players.PlayerAdded,function()playerList=Players:GetPlayers()end)
+connect(Players.PlayerRemoving,function()task.defer(function()playerList=Players:GetPlayers()end)end)
+local function colorPicker(tab,key,name)
+    local props={name=name,flag="Assassin_"..key,color=S[key],callback=function(value)S[key]=value end}
+    if tab.CreateColorPicker then return tab:CreateColorPicker(props)end
+    return tab:_add("colorpicker",props)
+end
 local function character(p)
     local all=Characters.GetAllCharacters()
-    local c=p.Character or all[p]
+    local c=all[p] or p.Character
     return c and c.Parent and c or nil
 end
 local function alive(p)
@@ -3194,8 +3325,8 @@ local function combatActive()
         and (Window.hidden or Window.minimised) and not Input:GetFocusedTextBox()
 end
 local function role(p)
-    if p==target then return "YOUR TARGET",green end
-    if (threats[p] or 0)>os.clock()then return "INCOMING KNIFE",red end
+    if p==target then return "YOUR TARGET",S.UseRoleColors and S.TargetColor or S.PlayerColor end
+    if (threats[p] or 0)>os.clock()then return "INCOMING KNIFE",S.UseRoleColors and S.ThreatColor or S.PlayerColor end
     local own,other=character(Player),character(p)
     local a=own and own:FindFirstChild("HumanoidRootPart")
     local b=other and other:FindFirstChild("Head")
@@ -3205,7 +3336,7 @@ local function role(p)
             return "LOOKING TOWARD YOU",Color3.fromRGB(255,202,104)
         end
     end
-    return "PLAYER",accent
+    return "PLAYER",S.PlayerColor
 end
 local function allowed(p)
     if p==Player or not alive(p)then return false end
@@ -3215,7 +3346,7 @@ end
 local gui=make("ScreenGui",{Name="BloxSenseAssassin",IgnoreGuiInset=true,ResetOnSpawn=false,DisplayOrder=70},Player.PlayerGui)
 local fov=make("Frame",{Name="AimRadius",AnchorPoint=Vector2.new(0.5,0.5),BackgroundTransparency=1,Size=UDim2.fromOffset(300,300)},gui)
 make("UICorner",{CornerRadius=UDim.new(1,0)},fov)
-make("UIStroke",{Thickness=1,Transparency=0.35,Color=accent},fov)
+local fovStroke=make("UIStroke",{Thickness=1,Transparency=0.35,Color=accent},fov)
 local function destroyDrawing(p)
     local d=drawings[p]
     if d then d.Box:Destroy();d.Highlight:Destroy();drawings[p]=nil end
@@ -3236,31 +3367,48 @@ local function getDrawing(p)
     local d={Box=box,Stroke=stroke,Name=name,Tag=tag,Info=info,Health=health,Fill=fill,Highlight=highlight}
     drawings[p]=d;return d
 end
+local boundCorners={}
+for _,x in ipairs({-2,2})do for _,y in ipairs({-3,3})do for _,z in ipairs({-1.3,1.3})do
+    table.insert(boundCorners,Vector3.new(x,y,z))
+end end end
 local function bounds(c,camera)
     local root=c:FindFirstChild("HumanoidRootPart")
     if not root then return nil end
     local low,high=Vector2.new(math.huge,math.huge),Vector2.new(-math.huge,-math.huge)
-    for _,x in ipairs({-2,2})do for _,y in ipairs({-3,3})do for _,z in ipairs({-1.3,1.3})do
-        local v=camera:WorldToViewportPoint(root.CFrame:PointToWorldSpace(Vector3.new(x,y,z)))
+    local cf=root.CFrame
+    for _,corner in ipairs(boundCorners)do
+        local v=camera:WorldToViewportPoint(cf:PointToWorldSpace(corner))
         if v.Z<=0.1 then return nil end
         low=Vector2.new(math.min(low.X,v.X),math.min(low.Y,v.Y));high=Vector2.new(math.max(high.X,v.X),math.max(high.Y,v.Y))
-    end end end
+    end
     if high.X<0 or high.Y<0 or low.X>camera.ViewportSize.X or low.Y>camera.ViewportSize.Y then return nil end
     return low,high-low
 end
+local sightParams=RaycastParams.new()
+sightParams.FilterType=Enum.RaycastFilterType.Exclude
+local sightCamera,sightCharacter,sightRefresh=nil,nil,0
+local raycastCount=0
 local function visible(part,origin,point)
-    local params=RaycastParams.new();params.FilterType=Enum.RaycastFilterType.Exclude
-    local ignore={workspace.CurrentCamera}
-    local own=character(Player);if own then table.insert(ignore,own)end
-    for _,name in ipairs({"KnifeHost","Pets","Ragdolls","GhostCoins"})do local v=workspace:FindFirstChild(name);if v then table.insert(ignore,v)end end
-    params.FilterDescendantsInstances=ignore
-    local hit=workspace:Raycast(origin,(point or part.Position)-origin,params)
+    local now=os.clock();local camera=workspace.CurrentCamera;local own=character(Player)
+    if sightCamera~=camera or sightCharacter~=own or now>=sightRefresh then
+        local ignore={camera}
+        if own then table.insert(ignore,own)end
+        for _,name in ipairs({"KnifeHost","Pets","Ragdolls","GhostCoins"})do local value=workspace:FindFirstChild(name);if value then table.insert(ignore,value)end end
+        sightParams.FilterDescendantsInstances=ignore;sightCamera=camera;sightCharacter=own;sightRefresh=now+1
+    end
+    raycastCount+=1
+    local hit=workspace:Raycast(origin,(point or part.Position)-origin,sightParams)
     return not hit or hit.Instance:IsDescendantOf(part.Parent)
+end
+local function regionSize(part)
+    if S.RegionSizing=="Multiplier"then return part.Size*math.clamp(S.Scale,1,4)end
+    local size=math.clamp(S.RegionSize,1,100)
+    return Vector3.new(size,size,size)
 end
 local function intersects(part,origin,direction,scale)
     local p=part.CFrame:PointToObjectSpace(origin)
     local d=part.CFrame:VectorToObjectSpace(direction)
-    local half=part.Size*scale*0.5
+    local half=(typeof(scale)=="Vector3" and scale or part.Size*scale)*0.5
     local near,far=0,1
     for _,axis in ipairs({"X","Y","Z"})do
         if math.abs(d[axis])<0.000001 then
@@ -3275,7 +3423,7 @@ local function intersects(part,origin,direction,scale)
     return near*direction.Magnitude
 end
 local function cursorRay(camera)
-    local ray=Player:GetMouse().UnitRay
+    local ray=mouse.UnitRay
     -- Project the actual mouse ray to viewport space, avoiding the top-bar inset mismatch.
     local screen=camera:WorldToViewportPoint(ray.Origin+ray.Direction*100)
     return ray,Vector2.new(screen.X,screen.Y)
@@ -3298,30 +3446,45 @@ local function findAim(camera)
     if not S.Aim and not S.Expand then return nil,nil end
     local ray,cursor=cursorRay(camera)
     local origin=throwOrigin(camera)
-    local aim,region,nearest,nearestRegion=nil,nil,S.AimRadius,math.huge
-    for _,p in ipairs(Players:GetPlayers())do
+    local aimCandidates,regionCandidates={},{}
+    local previous=selectedAim and selectedAim.Player
+    for _,p in ipairs(playerList)do
         if not allowed(p)then continue end
-        local c=character(p)
-        local root=c:FindFirstChild("HumanoidRootPart")
+        local c=character(p);local root=c:FindFirstChild("HumanoidRootPart")
         if (root.Position-origin).Magnitude>S.AimDistance then continue end
         local hitPart=c:FindFirstChild(S.RegionPart) or c:FindFirstChild("UpperTorso") or c:FindFirstChild("Torso")
         if S.Expand and hitPart and hitPart:IsA("BasePart")then
-            local distance=intersects(hitPart,ray.Origin,ray.Direction*S.AimDistance,S.Scale)
-            if distance and distance<nearestRegion and visible(hitPart,origin)then
-                region={Player=p,Part=hitPart,Character=c};nearestRegion=distance
+            local distance=intersects(hitPart,ray.Origin,ray.Direction*S.AimDistance,regionSize(hitPart))
+            if distance then
+                -- Center distance breaks ties when very large regions overlap the camera.
+                table.insert(regionCandidates,{Player=p,Part=hitPart,Character=c,Score=distance+(hitPart.Position-origin).Magnitude*0.0001})
             end
         end
         if S.Aim then
             for _,part in ipairs(aimParts(c))do
                 local screen,onScreen=camera:WorldToViewportPoint(part.Position)
                 local pixels=(Vector2.new(screen.X,screen.Y)-cursor).Magnitude
-                if onScreen and pixels<=nearest and visible(part,origin)then
-                    nearest=pixels;aim={Player=p,Part=part,Character=c}
+                if onScreen and pixels<=S.AimRadius then
+                    table.insert(aimCandidates,{Player=p,Part=part,Character=c,Score=pixels*(S.Sticky and p==previous and 0.85 or 1)})
                 end
             end
         end
     end
-    return aim,region
+    local checked={};local budget=6
+    local function choose(list,reserve)
+        table.sort(list,function(a,b)return a.Score<b.Score end)
+        for _,entry in ipairs(list)do
+            local clear=checked[entry.Part]
+            if clear==nil then
+                if budget<=reserve then break end
+                budget-=1;clear=visible(entry.Part,origin);checked[entry.Part]=clear
+            end
+            if clear then return entry end
+        end
+        return nil
+    end
+    local region=choose(regionCandidates,S.Aim and 3 or 0)
+    return choose(aimCandidates,0),region
 end
 local function interceptTime(delta,velocity,speed)
     local a=velocity:Dot(velocity)-speed*speed
@@ -3352,14 +3515,14 @@ local function predictedPoint(part,origin)
 end
 local function prepareThrow(camera)
     preparedThrow=nil
-    if not combatActive()then selectedAim,selectedRegion=nil,nil;return end
+    if (not S.Aim and not S.Expand) or not combatActive()then selectedAim,selectedRegion=nil,nil;return end
     selectedAim,selectedRegion=findAim(camera)
     local candidate=(S.Expand and selectedRegion) or (S.Aim and selectedAim)
     if not candidate then return end
     local point=predictedPoint(candidate.Part,throwOrigin(camera))
     if point.X~=point.X or point.Y~=point.Y or point.Z~=point.Z then return end
     preparedThrow={Point=point,Part=candidate.Part,Character=candidate.Character,Expires=os.clock()+0.12,
-        Aim=S.Aim,Expand=S.Expand,Scope=S.AimScope,Radius=S.AimRadius,Body=S.AimPart,Region=S.RegionPart,Scale=S.Scale}
+        Aim=S.Aim,Expand=S.Expand,Scope=S.AimScope,Radius=S.AimRadius,Body=S.AimPart,Region=S.RegionPart,Scale=S.Scale,RegionSize=S.RegionSize,RegionSizing=S.RegionSizing}
 end
 local function rewriteThrow(original)
     -- No Instance method calls here: preserve the intercepted FireServer namecall context.
@@ -3368,6 +3531,7 @@ local function rewriteThrow(original)
         or (not Window.hidden and not Window.minimised) or (not S.Aim and not S.Expand)
         or ready.Aim~=S.Aim or ready.Expand~=S.Expand or ready.Scope~=S.AimScope
         or ready.Radius~=S.AimRadius or ready.Body~=S.AimPart or ready.Region~=S.RegionPart or ready.Scale~=S.Scale
+        or ready.RegionSize~=S.RegionSize or ready.RegionSizing~=S.RegionSizing
         or ready.Part.Parent~=ready.Character then return original end
     S.Redirects+=1
     return ready.Point
@@ -3402,10 +3566,20 @@ activateAimHook=function()
 end
 activateAimHook()
 local catalog=Items.GetAllKnives()
+local modelTemplates={}
+local function rememberTemplate(object)
+    -- A matching ragdoll/prop name does not make it a knife template.
+    local folder=RS:FindFirstChild("KnifeModels")
+    if folder and object:IsDescendantOf(folder) and catalog[object.Name] and (object:IsA("BasePart") or object:IsA("Model")) then modelTemplates[object.Name]=object end
+end
+for _,object in ipairs(RS:GetDescendants())do rememberTemplate(object)end
+connect(RS.DescendantAdded,rememberTemplate)
+connect(RS.DescendantRemoving,function(object)if modelTemplates[object.Name]==object then modelTemplates[object.Name]=nil end end)
 local function supportedSkin(name)
     local info=catalog[name]
-    return info and type(info[4])=="string" and info[4]:match("%d+")~=nil
-        and type(info[1])=="string" and typeof(info[5])=="Vector3" and typeof(info[6])=="Vector3"
+    return info and ((type(info[4])=="string" and info[4]:match("%d+")~=nil
+        and type(info[1])=="string" and typeof(info[5])=="Vector3" and typeof(info[6])=="Vector3")
+        or (modelTemplates[name] and modelTemplates[name].Parent~=nil))
 end
 local names={};local totalSkins,compatibleSkins=0,0
 for name in pairs(catalog)do totalSkins+=1;table.insert(names,name);if supportedSkin(name)then compatibleSkins+=1 end end
@@ -3423,57 +3597,82 @@ if type(readfile)=="function"then
     local ok,data=pcall(function()return Http:JSONDecode(readfile(skinPath))end)
     if ok and type(data)=="table" and data.Version==1 and supportedSkin(data.Name)then S.SkinName=data.Name;S.Skin=data.Enabled==true end
 end
-local meshFields={"MeshId","TextureId","Scale","Offset"}
-local function restoreMesh(mesh,record)
-    if mesh.Parent then for _,key in ipairs(meshFields)do if mesh[key]==record.Applied[key]then mesh[key]=record.Original[key]end end end
-    skinRecords[mesh]=nil
-end
+local skinCharacter,skinDirty=nil,true
+local skinHandles,skinConnections={},{}
 local function restoreCosmetic(part,record)
+    for _,connection in ipairs(record.Connections)do connection:Disconnect()end
     if record.Visual then record.Visual:Destroy()end
     if part.Parent and part.LocalTransparencyModifier==1 then part.LocalTransparencyModifier=record.Transparency end
     cosmeticRecords[part]=nil
 end
 local function restoreSkins()
-    for mesh,record in pairs(skinRecords)do restoreMesh(mesh,record)end
     for part,record in pairs(cosmeticRecords)do restoreCosmetic(part,record)end
 end
-local function applySkin()
-    if not S.Skin or not supportedSkin(S.SkinName)then restoreSkins();return end
-    local c=character(Player);local seen,seenCosmetics={},{}
-    if c then
-        for _,mesh in ipairs(c:GetDescendants())do
-            if mesh:IsA("SpecialMesh") and mesh.Parent.Name=="KnifeDecorationHandle"then
-                local record=skinRecords[mesh]
-                if not record then record={Original={},Applied={}};skinRecords[mesh]=record end
-                for _,key in ipairs(meshFields)do
-                    if record.Applied[key]==nil or mesh[key]~=record.Applied[key]then record.Original[key]=mesh[key]end
-                end
-                local info=catalog[S.SkinName]
-                local values={MeshId=info[4],TextureId=info[1],Scale=info[5],Offset=info[6]}
-                if type(values.MeshId)=="string" and type(values.TextureId)=="string" and typeof(values.Scale)=="Vector3" and typeof(values.Offset)=="Vector3"then
-                    for _,key in ipairs(meshFields)do mesh[key]=values[key];record.Applied[key]=values[key]end
-                    seen[mesh]=true
-                end
-            end
-            if mesh:IsA("MeshPart") and mesh.Name=="KnifeDecorationHandle"then
-                local record=cosmeticRecords[mesh]
-                if not record or not record.Visual.Parent then
-                    if record then restoreCosmetic(mesh,record)end
-                    local visual=make("Part",{Name="BloxSenseKnifeFinish",Size=Vector3.one,CanCollide=false,CanTouch=false,CanQuery=false,
-                        Massless=true,CastShadow=false,CFrame=mesh.CFrame},mesh)
-                    local weld=make("WeldConstraint",{Part0=mesh,Part1=visual},visual)
-                    local special=make("SpecialMesh",{MeshType=Enum.MeshType.FileMesh},visual)
-                    record={Visual=visual,Mesh=special,Transparency=mesh.LocalTransparencyModifier};cosmeticRecords[mesh]=record
-                end
-                local info=catalog[S.SkinName]
-                record.Mesh.MeshId=info[4];record.Mesh.TextureId=info[1];record.Mesh.Scale=info[5];record.Mesh.Offset=info[6]
-                record.Visual.Transparency=mesh.Transparency;record.Visual.Color=mesh.Color
-                mesh.LocalTransparencyModifier=1;seenCosmetics[mesh]=true
-            end
+local function trackSkinCharacter(c)
+    if skinCharacter==c and not skinDirty then return end
+    if skinCharacter~=c then
+        restoreSkins()
+        for _,connection in ipairs(skinConnections)do connection:Disconnect()end
+        table.clear(skinConnections);skinCharacter=c
+        if c then
+            table.insert(skinConnections,c.DescendantAdded:Connect(function(object)if object.Name=="KnifeDecorationHandle"then skinDirty=true end end))
+            table.insert(skinConnections,c.DescendantRemoving:Connect(function(object)if object.Name=="KnifeDecorationHandle"then skinDirty=true end end))
         end
     end
-    for mesh,record in pairs(skinRecords)do if not seen[mesh]then restoreMesh(mesh,record)end end
-    for part,record in pairs(cosmeticRecords)do if not seenCosmetics[part]then restoreCosmetic(part,record)end end
+    table.clear(skinHandles)
+    if c then for _,object in ipairs(c:GetDescendants())do
+        if object:IsA("BasePart") and object.Name=="KnifeDecorationHandle"then table.insert(skinHandles,object)end
+    end end
+    skinDirty=false
+end
+local function createCosmetic(handle,name)
+    local info=catalog[name];local template=modelTemplates[name]
+    local visual
+    if template and template.Parent then
+        visual=template:Clone()
+        -- Copy appearance only. Never clone scripts, joints, effects or game behavior.
+        for _,object in ipairs(visual:GetDescendants())do
+            if not object:IsA("Model") and not object:IsA("Folder") and not object:IsA("BasePart") and not object:IsA("DataModelMesh") and not object:IsA("SurfaceAppearance") and not object:IsA("Decal") then object:Destroy()end
+        end
+    else
+        visual=Instance.new("Part");visual.Size=Vector3.one;visual.Color=Color3.new(1,1,1);visual.Material=Enum.Material.SmoothPlastic
+        make("SpecialMesh",{MeshType=Enum.MeshType.FileMesh,MeshId=info[4],TextureId=info[1],Scale=info[5],Offset=info[6]},visual)
+    end
+    visual.Name="BloxSenseKnifeFinish"
+    if visual:IsA("Model")then visual:PivotTo(handle.CFrame)else visual.CFrame=handle.CFrame end
+    local visualParts=visual:IsA("BasePart") and {visual} or visual:GetDescendants()
+    local baseTransparency={}
+    for _,part in ipairs(visualParts)do if part:IsA("BasePart")then
+        baseTransparency[part]=part.Transparency
+        part.Anchored=false;part.CanCollide=false;part.CanTouch=false;part.CanQuery=false;part.Massless=true;part.CastShadow=false
+        make("WeldConstraint",{Part0=handle,Part1=part},part)
+    end end
+    visual.Parent=handle
+    local record={Visual=visual,Name=name,Transparency=handle.LocalTransparencyModifier,Connections={}}
+    local function mirrorVisibility()
+        if not visual.Parent then return end
+        for part,base in pairs(baseTransparency)do
+            part.Transparency=1-(1-base)*(1-handle.Transparency);part.LocalTransparencyModifier=record.Transparency
+        end
+    end
+    table.insert(record.Connections,handle:GetPropertyChangedSignal("Transparency"):Connect(mirrorVisibility))
+    table.insert(record.Connections,handle:GetPropertyChangedSignal("LocalTransparencyModifier"):Connect(function()
+        if handle.LocalTransparencyModifier~=1 then record.Transparency=handle.LocalTransparencyModifier;mirrorVisibility();handle.LocalTransparencyModifier=1 end
+    end))
+    cosmeticRecords[handle]=record;mirrorVisibility();handle.LocalTransparencyModifier=1
+    return record
+end
+local function applySkin()
+    trackSkinCharacter(character(Player))
+    if not S.Skin or not supportedSkin(S.SkinName)then restoreSkins();return end
+    for part,record in pairs(cosmeticRecords)do
+        if not part.Parent or not part:IsDescendantOf(skinCharacter) or record.Name~=S.SkinName then restoreCosmetic(part,record)end
+    end
+    for _,handle in ipairs(skinHandles)do
+        local record=cosmeticRecords[handle]
+        if record and not record.Visual.Parent then restoreCosmetic(handle,record)end
+        if handle.Parent and not cosmeticRecords[handle]then createCosmetic(handle,S.SkinName)end
+    end
 end
 local h=tabs.Hub
 h:CreateText({name="ASSASSIN!",text="BloxSense selected the Assassin! adapter automatically. Supported games: Bloxstrike and Assassin!."})
@@ -3486,6 +3685,20 @@ local function columns(tab)
     local group=tab:CreateGroup({direction="row"})
     local left=group:CreateGroup({direction="column"})
     local right=group:CreateGroup({direction="column"})
+    for _,column in ipairs({left,right})do
+        function column:CreateDropdown(options)
+            local element=self:_add("dropdown",options)
+            function element:_bringIntoView()
+                local page=tab.tabPage
+                if page.AbsoluteWindowSize.Y<=0 then return end
+                local canvas=page.CanvasPosition
+                local top=self.main.AbsolutePosition.Y-page.AbsolutePosition.Y+canvas.Y
+                local overflow=top+self:_openHeight()-canvas.Y-page.AbsoluteWindowSize.Y
+                if overflow>0 then page.CanvasPosition=Vector2.new(canvas.X,math.max(0,math.min(canvas.Y+overflow+8,top)))end
+            end
+            return element
+        end
+    end
     local function fit()
         local narrow=Window.elements.AbsoluteSize.X<620
         group.layout.FillDirection=narrow and Enum.FillDirection.Vertical or Enum.FillDirection.Horizontal
@@ -3513,6 +3726,11 @@ v:CreateSection({name="KNIFE ESP"})
 local knifeRow=v:CreateGroup({direction="row"})
 toggle(knifeRow,"KnifeESP","Thrown knives");toggle(knifeRow,"KnifeOwner","Owner names")
 slider(v,"KnifeDistance","Knife range (studs)",50,1500)
+v:CreateSection({name="STYLE & PERFORMANCE"})
+toggle(v,"UseRoleColors","Use target / threat colors")
+colorPicker(v,"PlayerColor","Player color");colorPicker(v,"TargetColor","Target color");colorPicker(v,"ThreatColor","Incoming threat color")
+slider(v,"TextSize","Text size",9,18);slider(v,"BoxThickness","Box thickness",1,4,0.5);slider(v,"BoxOpacity","Box fill (%)",0,40)
+slider(v,"ESPSmooth","Motion smoothing (%)",0,90);slider(v,"ESPHz","Overlay refresh (Hz)",20,144)
 local t=tabs.Targets
 t:CreateSection({name="NOTIFICATIONS"})
 toggle(t,"HUD","Incoming knives");toggle(t,"TargetAlerts","New target")
@@ -3526,6 +3744,9 @@ dropdown(selection,"AimScope","Players",{"Assigned target","Target + incoming th
 dropdown(selection,"AimPart","Body part",{"Automatic","Head","UpperTorso","Torso","HumanoidRootPart"})
 slider(selection,"AimRadius","Radius (px)",20,800);slider(selection,"AimDistance","Range (studs)",50,1500)
 toggle(selection,"ShowFOV","Show radius")
+toggle(selection,"Sticky","Prefer current target")
+slider(selection,"AimHz","Selection refresh (Hz)",15,60)
+colorPicker(selection,"FOVColor","Radius color")
 prediction:CreateSection({name="PREDICTION"})
 toggle(prediction,"Prediction","Movement prediction")
 dropdown(prediction,"PredictionMode","Mode",{"Adaptive","Manual"})
@@ -3537,9 +3758,12 @@ toggle(b,"Expand","Expanded aim regions")
 local regionControls,displayControls=columns(b)
 regionControls:CreateSection({name="SELECTION"})
 dropdown(regionControls,"RegionPart","Body part",{"Head","UpperTorso","Torso","HumanoidRootPart"})
-slider(regionControls,"Scale","Scale",1,4,0.1)
+dropdown(regionControls,"RegionSizing","Sizing",{"Studs","Multiplier"})
+slider(regionControls,"RegionSize","Size (studs)",1,100,1)
+slider(regionControls,"Scale","Multiplier",1,4,0.1)
 displayControls:CreateSection({name="DISPLAY"})
 toggle(displayControls,"ShowRegions","Show regions");slider(displayControls,"RegionOpacity","Opacity (%)",5,70)
+colorPicker(displayControls,"RegionColor","Region color")
 local sk=tabs.Skins
 local filterSkins
 local skinToggle=sk:CreateToggle({name="Local knife skin",flag="Assassin_Skin",value=S.Skin,description="Cosmetic on this client; does not add items to your inventory.",callback=function(value)S.Skin=value;applySkin();saveSkin()end})
@@ -3600,8 +3824,9 @@ renderSkins=function()
             pcall(function()
                 game:GetService("ContentProvider"):PreloadAsync({preview},function(_,status)
                     if status~=Enum.AssetFetchStatus.Failure or S.Destroyed or not preview.Parent or preview.Image~=originalImage then return end
-                    if supportedSkin(name)then
-                        preview.Image="rbxthumb://type=Asset&id="..catalog[name][4]:match("%d+").."&w=420&h=420"
+                    local meshId=type(catalog[name][4])=="string" and catalog[name][4]:match("%d+")
+                    if meshId then
+                        preview.Image="rbxthumb://type=Asset&id="..meshId.."&w=420&h=420"
                     end
                 end)
             end)
@@ -3639,6 +3864,7 @@ m:CreateSection({name="CAMERA"})
 toggle(m,"FovOn","Custom camera FOV");slider(m,"Fov","Camera FOV",40,120)
 m:CreateSection({name="SESSION"})
 toggle(m,"AntiAFK","Anti-AFK")
+local telemetry=createHubTelemetry(Window,m,"Assassin!")
 local virtualUser=game:GetService("VirtualUser")
 connect(Player.Idled,function()
     if not S.AntiAFK or S.Destroyed or Input:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)then return end
@@ -3705,52 +3931,74 @@ local function updateKnifeESP(camera)
         if not seen[knife]then drawing.Billboard:Destroy();drawing.Outline:Destroy();knifeDrawings[knife]=nil end
     end
 end
-local function step()
+local aimElapsed,visualElapsed,threatElapsed=0,0,0
+local function step(dt)
+    dt=dt or 1/60
     if S.Destroyed then return end
     local camera=workspace.CurrentCamera;if not camera then return end
     local now=os.clock()
-    updateThreats(now)
-    updateKnifeESP(camera)
-    prepareThrow(camera)
-    local _,cursor=cursorRay(camera)
-    fov.Position=UDim2.fromOffset(cursor.X,cursor.Y);fov.Size=UDim2.fromOffset(S.AimRadius*2,S.AimRadius*2)
+    aimElapsed+=dt;visualElapsed+=dt;threatElapsed+=dt
+    if threatElapsed>=0.1 then threatElapsed%=0.1;updateThreats(now);updateKnifeESP(camera)end
+    if aimElapsed>=1/S.AimHz then aimElapsed%=1/S.AimHz;prepareThrow(camera)end
     fov.Visible=S.Aim and S.ShowFOV and combatActive()
-    for _,p in ipairs(Players:GetPlayers())do
+    if fov.Visible then
+        local _,cursor=cursorRay(camera)
+        fov.Position=UDim2.fromOffset(cursor.X,cursor.Y);fov.Size=UDim2.fromOffset(S.AimRadius*2,S.AimRadius*2);fovStroke.Color=S.FOVColor
+    end
+    if visualElapsed>=1/S.ESPHz then
+    local visualDt=visualElapsed;visualElapsed%=1/S.ESPHz
+    for _,p in ipairs(playerList)do
         if p==Player then continue end
-        local c=character(p);local d=getDrawing(p)
-        d.Box.Visible=false;d.Highlight.Enabled=false
+        local c=character(p);local d=drawings[p]
+        if not S.ESP and not S.ShowRegions then
+            if d then d.Box.Visible=false;d.Highlight.Enabled=false end
+            if regions[p]then regions[p].Visible=false end
+            continue
+        end
+        d=d or getDrawing(p)
         if regions[p]then regions[p].Visible=false end
-        if not c or not alive(p)then continue end
+        if not c or not alive(p)then d.Box.Visible=false;d.Highlight.Enabled=false;d.Low=nil;continue end
         local root=c:FindFirstChild("HumanoidRootPart")
         local distance=(root.Position-camera.CFrame.Position).Magnitude
-        if distance>S.ESPDistance then continue end
+        if distance>S.ESPDistance then d.Box.Visible=false;d.Highlight.Enabled=false;d.Low=nil;continue end
         local title,color=role(p)
         local priority=title=="YOUR TARGET" or title=="INCOMING KNIFE"
         if S.ESP and (not S.OnlyPriority or priority)then
             local low,size=bounds(c,camera)
             if low then
+                local alpha=S.ESPSmooth>0 and 1-math.exp(-visualDt*(110-S.ESPSmooth)) or 1
+                if d.Low then low=d.Low:Lerp(low,alpha);size=d.Size:Lerp(size,alpha)end
+                d.Low,d.Size=low,size
                 d.Box.Visible=true;d.Box.Position=UDim2.fromOffset(low.X,low.Y);d.Box.Size=UDim2.fromOffset(size.X,size.Y)
-                d.Box.BackgroundTransparency=S.Boxes and 0.96 or 1;d.Stroke.Enabled=S.Boxes;d.Stroke.Color=color
+                if now>=(d.NextDetails or 0)then
+                d.NextDetails=now+0.1
+                d.Box.BackgroundTransparency=S.Boxes and 1-S.BoxOpacity/100 or 1;d.Stroke.Enabled=S.Boxes;d.Stroke.Color=color;d.Stroke.Thickness=S.BoxThickness
+                d.Name.TextSize=S.TextSize;d.Tag.TextSize=math.max(9,S.TextSize-2);d.Info.TextSize=math.max(9,S.TextSize-1)
                 d.Name.Text=S.Names and p.DisplayName or "";d.Tag.Text=S.RoleLabels and title or "";d.Tag.TextColor3=color
                 local info={};if S.Distance then table.insert(info,math.floor(distance).." studs")end
                 if S.Weapons then table.insert(info,c:FindFirstChild("Knife") and "Knife equipped" or "Unarmed")end
                 d.Info.Text=table.concat(info," · ")
                 local hum=c:FindFirstChildOfClass("Humanoid");local hp=math.clamp(hum.Health/math.max(hum.MaxHealth,1),0,1)
                 d.Health.Visible=S.Health;d.Fill.Size=UDim2.fromScale(1,hp);d.Fill.BackgroundColor3=Color3.fromRGB(255*(1-hp),190*hp+40,100)
-            end
+                end
+            else d.Box.Visible=false;d.Low=nil end
+            if now>=(d.NextHighlight or 0)then
+            d.NextHighlight=now+0.1
             d.Highlight.Adornee=c;d.Highlight.Enabled=S.Chams;d.Highlight.FillColor=color;d.Highlight.OutlineColor=color
             d.Highlight.FillTransparency=S.Fill/100
             d.Highlight.DepthMode=S.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
-        end
+            end
+        else d.Box.Visible=false;d.Highlight.Enabled=false;d.Low=nil end
         if S.ShowRegions and allowed(p)then
             local part=c:FindFirstChild(S.RegionPart)
             if part then
                 local box=regions[p]
                 if not box then box=make("BoxHandleAdornment",{AlwaysOnTop=true,ZIndex=1},gui);regions[p]=box end
-                box.Adornee=part;box.Size=part.Size*(S.Expand and S.Scale or 1);box.Color3=color;box.Transparency=1-S.RegionOpacity/100;box.Visible=true
+                box.Adornee=part;box.Size=S.Expand and regionSize(part) or part.Size;box.Color3=S.RegionColor;box.Transparency=1-S.RegionOpacity/100;box.Visible=true
             end
         end
     end
+    end -- visual cadence
     if S.FovOn then
         if cameraForFov~=camera then restoreFov();cameraForFov=camera;savedFov=camera.FieldOfView end
         if appliedFov and camera.FieldOfView~=appliedFov then savedFov=camera.FieldOfView end
@@ -3760,8 +4008,7 @@ local function step()
 end
 local elapsed,lastError=0,0
 connect(Run.RenderStepped,function(dt)
-    elapsed+=dt;if elapsed<1/60 then return end;elapsed=0
-    local ok,err=pcall(step)
+    local ok,err=pcall(step,dt)
     if not ok then preparedThrow=nil end
     if not ok and os.clock()-lastError>5 then lastError=os.clock();warn("BloxSense Assassin: "..tostring(err))end
 end)
@@ -3782,7 +4029,8 @@ local function cleanup()
     for _,c in ipairs(connections)do c:Disconnect()end
     table.clear(connections)
     action:UnbindAction("BloxSenseAssassinWheel")
-    restoreSkins();restoreFov();gui:Destroy()
+    restoreSkins();for _,c in ipairs(skinConnections)do c:Disconnect()end
+    telemetry.Destroy();restoreFov();gui:Destroy()
     if env.BloxSenseController and env.BloxSenseController.State==S then env.BloxSenseController=nil;env.BloxSenseCleanup=nil end
     if not Window.unloaded then Window:Unload()end
 end
@@ -3793,10 +4041,10 @@ Window.Unload=function(self,...)
     return oldUnload(self,...)
 end
 env.BloxSenseCleanup=cleanup
-local controller={Game="Assassin!",Window=Window,State=S,Cleanup=cleanup,
+local controller={Game="Assassin!",Window=Window,State=S,Cleanup=cleanup,Telemetry=telemetry,
     Inspect=function()return {Target=target and target.Name,Hook=S.HookStatus,Redirects=S.Redirects,Skins=#names,ESPPlayers=#Players:GetPlayers()-1}end,
     Test={Intersects=intersects,FindAim=findAim,RewriteThrow=rewriteThrow,Character=character,SelectSkin=selectSkin,
-        ApplySkin=applySkin,RestoreSkins=restoreSkins,Step=step,SetTarget=setTarget,GetTarget=function()return target end,Role=role,SupportedSkin=supportedSkin,InterceptTime=interceptTime,PredictedPoint=predictedPoint,PrepareThrow=prepareThrow,UpdateKnifeESP=updateKnifeESP}}
+        ApplySkin=applySkin,RestoreSkins=restoreSkins,Step=step,SetTarget=setTarget,GetTarget=function()return target end,Role=role,SupportedSkin=supportedSkin,InterceptTime=interceptTime,PredictedPoint=predictedPoint,PrepareThrow=prepareThrow,UpdateKnifeESP=updateKnifeESP,RegionSize=regionSize,RaycastCount=function()return raycastCount end}}
 env.BloxSenseController=controller
 applyHubDashboard(Window,tabs.Hub,"Assassin!")
 refreshTarget();applySkin()
