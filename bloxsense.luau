@@ -3819,4 +3819,3 @@ local window=Rayfield:CreateWindow({name="BloxSense Hub",subtitle="Unsupported g
 local tab=window:CreateTab({name="Hub",icon="house"})
 tab:CreateText({name="Supported games",text="Bloxstrike and Assassin!. Join a supported game and run BloxSense again. No game features were loaded here."})
 return {Game="Unsupported",Window=window}
-   
