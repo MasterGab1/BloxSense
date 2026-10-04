@@ -362,6 +362,123 @@ return function(Window, tab, gameName)
 end
 
 end)()
+local createAssassinThrowController=(function()
+-- Instant knife input. Sends the game's normal throw arguments and waits for release confirmation.
+return function(context)
+    local S=context.State
+    local clock=context.Clock or os.clock
+    local player=game:GetService("Players").LocalPlayer
+    local input=game:GetService("UserInputService")
+    local run=game:GetService("RunService")
+    local remote=game:GetService("ReplicatedStorage").Remotes.ThrowKnife
+    local released=game:GetService("ReplicatedStorage").Remotes.DoThrowKnife
+    local connections,muted={},{ }
+    local tool,baseTransparency,animations
+    local held,pending,lastSent=false,nil,-math.huge
+    local destroyed=false
+    local module={Ready=false}
+    local function restoreInput()
+        for _,connection in ipairs(muted)do pcall(function()connection:Enable()end)end
+        table.clear(muted);module.Ready=false;held=false;pending=nil
+        tool,baseTransparency,animations=nil,nil,nil
+    end
+    function module:Refresh()
+        if destroyed then return end
+        local knife=S.InstantThrow and context.Active() and context.Knife() or nil
+        if knife~=tool then restoreInput();tool=knife end
+        if not knife then if not S.InstantThrow then S.ThrowStatus="Normal input"end;return end
+        if type(getconnections)~="function" or type(getfenv)~="function"then
+            S.ThrowStatus="Instant input unavailable in this executor";return
+        end
+        -- Only replace this equipped knife's input handler; all other game input remains live.
+        for _,connection in ipairs(getconnections(input.InputBegan))do
+            local fn=connection.Function
+            if connection.Enabled and type(fn)=="function" and type(connection.Disable)=="function" and type(connection.Enable)=="function"then
+                local ok,environment=pcall(getfenv,fn)
+                local script=ok and rawget(environment,"script")
+                if typeof(script)=="Instance" and script:IsA("LocalScript") and script:IsDescendantOf(knife)then
+                    connection:Disable();table.insert(muted,connection);module.Ready=true
+                    if debug and type(debug.getupvalues)=="function"then
+                        local success,values=pcall(debug.getupvalues,fn)
+                        if success then for _,value in pairs(values)do
+                            if type(value)=="table" and typeof(rawget(value,"Throw"))=="Instance" and value.Throw:IsA("AnimationTrack")then animations=value end
+                        end end
+                    end
+                end
+            end
+        end
+    end
+    local function cursorPoint()
+        local ray=player:GetMouse().UnitRay
+        local params=RaycastParams.new();params.FilterType=Enum.RaycastFilterType.Exclude
+        local ignore={workspace.CurrentCamera}
+        local character=context.Character();if character then table.insert(ignore,character)end
+        for _,name in ipairs({"Pets","KnifeHost","GhostCoins","Ragdolls"})do local object=workspace:FindFirstChild(name);if object then table.insert(ignore,object)end end
+        params.FilterDescendantsInstances=ignore
+        local hit=workspace:Raycast(ray.Origin,ray.Direction*1000,params)
+        return hit and hit.Position or ray.Origin+ray.Direction*1000
+    end
+    function module:TryThrow(now)
+        now=now or clock()
+        if destroyed or not S.InstantThrow or not context.Active()then return false,"Inactive"end
+        if not self.Ready or context.Knife()~=tool then return false,"Knife input not ready"end
+        if pending then return false,"Waiting for server confirmation"end
+        if now-lastSent<math.max(S.ThrowInterval/1000,0.08)then return false,"Rate interval"end
+        local handle=tool:FindFirstChild("Handle")
+        local decoration=handle and handle:FindFirstChild("KnifeDecorationHandle")
+        local orientation=tool:FindFirstChild("throwOrientation") or tool:FindFirstChild("RotateValue")
+        if not decoration or decoration.Transparency>=0.6 or not orientation then return false,"Knife not ready"end
+        local rotation=orientation.Value
+        if typeof(rotation)~="CFrame"then return false,"Knife orientation unavailable"end
+        baseTransparency=baseTransparency or decoration.Transparency
+        -- Selection is refreshed at the actual input event, not just the previous render tick.
+        context.Prepare()
+        local point=context.Resolve(cursorPoint())
+        lastSent=now;pending=now;S.ThrowRequests+=1
+        local ok,err=pcall(function()remote:FireServer(point,baseTransparency,rotation)end)
+        if not ok then pending=nil;held=false;S.ThrowStatus="Throw error: "..tostring(err);return false,S.ThrowStatus end
+        S.ThrowStatus="Waiting for server confirmation"
+        return true
+    end
+    table.insert(connections,released.OnClientEvent:Connect(function(_,_,owner)
+        if owner~=player or not pending or not S.InstantThrow then return end
+        pending=nil;S.ThrowConfirmed+=1;S.ThrowStatus="Throw confirmed"
+        if animations then pcall(function()animations.ThrowCharge:Stop();animations.Throw:Play(0.1,1,3)end)end
+    end))
+    table.insert(connections,input.InputBegan:Connect(function(event,processed)
+        if processed or (event.UserInputType~=Enum.UserInputType.MouseButton1 and event.KeyCode~=Enum.KeyCode.ButtonR2)then return end
+        if not S.InstantThrow or not context.Active() or not module.Ready then return end
+        held=true
+        local ok,reason=module:TryThrow()
+        if not ok then S.ThrowStatus=reason end
+    end))
+    table.insert(connections,input.InputEnded:Connect(function(event)
+        if event.UserInputType==Enum.UserInputType.MouseButton1 or event.KeyCode==Enum.KeyCode.ButtonR2 then held=false end
+    end))
+    table.insert(connections,input.WindowFocusReleased:Connect(function()held=false end))
+    local scan,elapsed=0,0
+    table.insert(connections,run.Heartbeat:Connect(function(dt)
+        if not S.InstantThrow then return end
+        scan+=dt;elapsed+=dt
+        if scan>=0.2 then scan%=0.2;module:Refresh()end
+        if elapsed<1/60 then return end;elapsed%=1/60
+        local now=clock()
+        if pending and now-pending>1.5 then
+            pending=nil;held=false;S.ThrowStatus="No release confirmed; server may be limiting throws"
+        end
+        if not context.Active()then held=false;return end
+        if S.InstantThrow and S.RepeatThrow and held then module:TryThrow(now)end
+    end))
+    function module:Destroy()
+        destroyed=true;restoreInput()
+        for _,connection in ipairs(connections)do connection:Disconnect()end
+        table.clear(connections)
+    end
+    module:Refresh()
+    return module
+end
+
+end)()
 adapters.bloxstrike = function()
 local Modules = {}
 
@@ -3213,7 +3330,7 @@ for _,entry in ipairs({{"Hub","house"},{"Visuals","eye"},{"Targets","crosshair"}
 end
 local S:any={Destroyed=false,ESP=true,Boxes=true,Chams=true,Health=true,Names=true,Distance=true,Weapons=true,
     ThroughWalls=true,OnlyPriority=false,ESPDistance=1200,Fill=75,HUD=true,LookWarning=false,TargetAlerts=true,
-    Aim=false,AimRadius=150,AimDistance=800,AimPart="Automatic",AimScope="Assigned target",Prediction=true,PredictionMode="Adaptive",Lead=0.12,ProjectileSpeed=300,
+    Aim=false,AimRadius=150,AimDistance=800,AimPart="Automatic",AimScope="Assigned target",AimAcquisition="Visible targets",AimStatus="Off",InstantThrow=false,RepeatThrow=true,ThrowInterval=150,ThrowRequests=0,ThrowConfirmed=0,ThrowStatus="Normal input",Prediction=true,PredictionMode="Adaptive",Lead=0.12,ProjectileSpeed=300,
     ShowFOV=true,Expand=false,Scale=2,RegionSize=4,RegionSizing="Studs",AimHz=30,Sticky=true,RegionPart="Head",ShowRegions=false,RegionOpacity=20,
     Skin=false,SkinName="Basic",SkinFilter="Applicable only",SkinRarity="All rarities",FovOn=false,Fov=70,AntiAFK=false,KnifeESP=false,KnifeOwner=true,KnifeDistance=600,RoleLabels=true,ESPHz=60,TextSize=12,BoxThickness=1.5,BoxOpacity=4,ESPSmooth=0,UseRoleColors=true,PlayerColor=Color3.fromRGB(91,157,255),TargetColor=Color3.fromRGB(86,229,173),ThreatColor=Color3.fromRGB(255,101,111),RegionColor=Color3.new(1,1,1),FOVColor=Color3.new(1,1,1),Redirects=0,HookStatus="Not installed"}
 if reloadState then
@@ -3228,6 +3345,7 @@ local preparedThrow
 local measuredSpeed
 local alertTimes={}
 local activateAimHook
+local throwController
 local accent=Color3.fromRGB(91,157,255)
 local playerList=Players:GetPlayers()
 local mouse=Player:GetMouse()
@@ -3246,6 +3364,7 @@ local function connect(signal,fn)local c=signal:Connect(fn);table.insert(connect
 -- Also make partial initialization reversible if a UI component fails to construct.
 env.BloxSenseCleanup=function()
     S.Destroyed=true
+    if throwController then throwController:Destroy()end
     for _,connection in ipairs(connections)do connection:Disconnect()end
     if not Window.unloaded then Window:Unload()end
     local overlay=Player.PlayerGui:FindFirstChild("BloxSenseAssassin");if overlay then overlay:Destroy()end
@@ -3266,7 +3385,8 @@ local function label(parent,props)
 end
 local function toggle(tab,key,name,description)
     return tab:CreateToggle({name=name,flag="Assassin_"..key,value=S[key],description=description,
-        callback=function(v)S[key]=v;preparedThrow=nil;if (key=="Aim" or key=="Expand") and activateAimHook then activateAimHook()end end})
+        callback=function(v)S[key]=v;preparedThrow=nil;if (key=="Aim" or key=="Expand") and activateAimHook then activateAimHook()end
+            if key=="InstantThrow" and throwController then throwController:Refresh()end end})
 end
 local function slider(tab,key,name,min,max,step)
     return tab:CreateSlider({name=name,flag="Assassin_"..key,value=S[key],range={min,max},increment=step or 1,
@@ -3464,7 +3584,7 @@ local function findAim(camera)
             for _,part in ipairs(aimParts(c))do
                 local screen,onScreen=camera:WorldToViewportPoint(part.Position)
                 local pixels=(Vector2.new(screen.X,screen.Y)-cursor).Magnitude
-                if onScreen and pixels<=S.AimRadius then
+                if onScreen and (S.AimAcquisition=="Visible targets" or pixels<=S.AimRadius)then
                     table.insert(aimCandidates,{Player=p,Part=part,Character=c,Score=pixels*(S.Sticky and p==previous and 0.85 or 1)})
                 end
             end
@@ -3515,14 +3635,23 @@ local function predictedPoint(part,origin)
 end
 local function prepareThrow(camera)
     preparedThrow=nil
-    if (not S.Aim and not S.Expand) or not combatActive()then selectedAim,selectedRegion=nil,nil;return end
+    if not S.Aim and not S.Expand then selectedAim,selectedRegion=nil,nil;S.AimStatus="Off";return end
+    if not combatActive()then
+        selectedAim,selectedRegion=nil,nil
+        S.AimStatus=not (Window.hidden or Window.minimised) and "Close the menu with L" or "Equip a knife in a live round"
+        return
+    end
     selectedAim,selectedRegion=findAim(camera)
     local candidate=(S.Expand and selectedRegion) or (S.Aim and selectedAim)
-    if not candidate then return end
+    if not candidate then
+        S.AimStatus=S.AimScope=="Assigned target" and not target and "No assigned target" or "No visible target in selection"
+        return
+    end
+    S.AimStatus="Ready: "..candidate.Player.DisplayName
     local point=predictedPoint(candidate.Part,throwOrigin(camera))
     if point.X~=point.X or point.Y~=point.Y or point.Z~=point.Z then return end
     preparedThrow={Point=point,Part=candidate.Part,Character=candidate.Character,Expires=os.clock()+0.12,
-        Aim=S.Aim,Expand=S.Expand,Scope=S.AimScope,Radius=S.AimRadius,Body=S.AimPart,Region=S.RegionPart,Scale=S.Scale,RegionSize=S.RegionSize,RegionSizing=S.RegionSizing}
+        Aim=S.Aim,Expand=S.Expand,Scope=S.AimScope,Radius=S.AimRadius,Body=S.AimPart,Region=S.RegionPart,Scale=S.Scale,RegionSize=S.RegionSize,RegionSizing=S.RegionSizing,Acquisition=S.AimAcquisition}
 end
 local function rewriteThrow(original)
     -- No Instance method calls here: preserve the intercepted FireServer namecall context.
@@ -3532,6 +3661,7 @@ local function rewriteThrow(original)
         or ready.Aim~=S.Aim or ready.Expand~=S.Expand or ready.Scope~=S.AimScope
         or ready.Radius~=S.AimRadius or ready.Body~=S.AimPart or ready.Region~=S.RegionPart or ready.Scale~=S.Scale
         or ready.RegionSize~=S.RegionSize or ready.RegionSizing~=S.RegionSizing
+        or ready.Acquisition~=S.AimAcquisition
         or ready.Part.Parent~=ready.Character then return original end
     S.Redirects+=1
     return ready.Point
@@ -3565,6 +3695,11 @@ activateAimHook=function()
     else S.HookStatus="Unavailable in this executor" end
 end
 activateAimHook()
+throwController=createAssassinThrowController({State=S,Active=combatActive,
+    Character=function()return character(Player)end,
+    Knife=function()local c=character(Player);return c and c:FindFirstChild("Knife")end,
+    Prepare=function()local camera=workspace.CurrentCamera;if camera then prepareThrow(camera)end end,
+    Resolve=rewriteThrow})
 local catalog=Items.GetAllKnives()
 local modelTemplates={}
 local function rememberTemplate(object)
@@ -3741,6 +3876,7 @@ toggle(a,"Aim","Silent aim")
 local selection,prediction=columns(a)
 selection:CreateSection({name="TARGETING"})
 dropdown(selection,"AimScope","Players",{"Assigned target","Target + incoming threats","All players"})
+dropdown(selection,"AimAcquisition","Acquisition",{"Visible targets","Radius"})
 dropdown(selection,"AimPart","Body part",{"Automatic","Head","UpperTorso","Torso","HumanoidRootPart"})
 slider(selection,"AimRadius","Radius (px)",20,800);slider(selection,"AimDistance","Range (studs)",50,1500)
 toggle(selection,"ShowFOV","Show radius")
@@ -3752,7 +3888,12 @@ toggle(prediction,"Prediction","Movement prediction")
 dropdown(prediction,"PredictionMode","Mode",{"Adaptive","Manual"})
 slider(prediction,"Lead","Manual lead (s)",0,0.4,0.01)
 slider(prediction,"ProjectileSpeed","Knife speed (studs/s)",100,600,10)
-prediction:CreateButton({name="Check aim status",callback=function()notify("Aim",S.HookStatus.." · "..S.Redirects.." redirected throws")end})
+prediction:CreateButton({name="Check aim status",callback=function()notify("Aim",S.AimStatus.." · "..S.HookStatus.." · "..S.Redirects.." redirected throws")end})
+a:CreateSection({name="THROW INPUT"})
+toggle(a,"InstantThrow","Instant throw","A click throws immediately instead of charging a stab/throw. Server limits still apply.")
+toggle(a,"RepeatThrow","Repeat while held")
+slider(a,"ThrowInterval","Repeat interval (ms)",80,1500,10)
+a:CreateButton({name="Throw status",callback=function()notify("Throws",S.ThrowStatus.." · "..S.ThrowConfirmed.." releases confirmed / "..S.ThrowRequests.." requested")end})
 local b=tabs.Hitboxes
 toggle(b,"Expand","Expanded aim regions")
 local regionControls,displayControls=columns(b)
@@ -3940,7 +4081,7 @@ local function step(dt)
     aimElapsed+=dt;visualElapsed+=dt;threatElapsed+=dt
     if threatElapsed>=0.1 then threatElapsed%=0.1;updateThreats(now);updateKnifeESP(camera)end
     if aimElapsed>=1/S.AimHz then aimElapsed%=1/S.AimHz;prepareThrow(camera)end
-    fov.Visible=S.Aim and S.ShowFOV and combatActive()
+    fov.Visible=S.Aim and S.ShowFOV and S.AimAcquisition=="Radius" and combatActive()
     if fov.Visible then
         local _,cursor=cursorRay(camera)
         fov.Position=UDim2.fromOffset(cursor.X,cursor.Y);fov.Size=UDim2.fromOffset(S.AimRadius*2,S.AimRadius*2);fovStroke.Color=S.FOVColor
@@ -4025,6 +4166,7 @@ end,false,Enum.ContextActionPriority.High.Value+100,Enum.UserInputType.MouseWhee
 local function cleanup()
     if S.Destroyed then return end
     S.Destroyed=true;preparedThrow=nil
+    throwController:Destroy()
     if hookState and hookState.Resolve==rewriteThrow then hookState.Resolve=nil;hookState.Remote=nil end
     for _,c in ipairs(connections)do c:Disconnect()end
     table.clear(connections)
@@ -4041,8 +4183,8 @@ Window.Unload=function(self,...)
     return oldUnload(self,...)
 end
 env.BloxSenseCleanup=cleanup
-local controller={Game="Assassin!",Window=Window,State=S,Cleanup=cleanup,Telemetry=telemetry,
-    Inspect=function()return {Target=target and target.Name,Hook=S.HookStatus,Redirects=S.Redirects,Skins=#names,ESPPlayers=#Players:GetPlayers()-1}end,
+local controller={Game="Assassin!",Window=Window,State=S,Cleanup=cleanup,Telemetry=telemetry,ThrowController=throwController,
+    Inspect=function()return {Target=target and target.Name,Hook=S.HookStatus,AimStatus=S.AimStatus,ThrowStatus=S.ThrowStatus,ThrowRequests=S.ThrowRequests,ThrowConfirmed=S.ThrowConfirmed,Redirects=S.Redirects,Skins=#names,ESPPlayers=#Players:GetPlayers()-1}end,
     Test={Intersects=intersects,FindAim=findAim,RewriteThrow=rewriteThrow,Character=character,SelectSkin=selectSkin,
         ApplySkin=applySkin,RestoreSkins=restoreSkins,Step=step,SetTarget=setTarget,GetTarget=function()return target end,Role=role,SupportedSkin=supportedSkin,InterceptTime=interceptTime,PredictedPoint=predictedPoint,PrepareThrow=prepareThrow,UpdateKnifeESP=updateKnifeESP,RegionSize=regionSize,RaycastCount=function()return raycastCount end}}
 env.BloxSenseController=controller
