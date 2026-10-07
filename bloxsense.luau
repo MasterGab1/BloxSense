@@ -65,6 +65,8 @@ return {Logo=logoAsset,DrawIcon=function(window,tab)
     local name=tab.name
     if name=="Hub" then
         path({{2,10},{11,2},{20,10}});path({{5,9},{5,20},{9,20},{9,14},{13,14},{13,20},{17,20},{17,9}})
+    elseif name=="Library" then
+        segment(3,3,3,20);segment(7,3,7,20);segment(11,5,11,20);segment(15,4,20,20)
     elseif name=="Visuals" then
         path({{1,11},{5,6},{11,4},{17,6},{21,11},{17,16},{11,18},{5,16}},true);circle(11,11,3)
     elseif name=="Targets" then
@@ -100,6 +102,13 @@ end)()
 local applyHubDashboard=(function()
 -- Shared monochrome dashboard and window chrome, used by both game adapters.
 return function(window,home,gameName)
+    -- A named save also becomes this game's next startup profile, matching native named-load behavior.
+    local nativeSave=window.Save
+    function window:Save(name)
+        local saved=nativeSave(self,name)
+        if saved and name~=nil then nativeSave(self)end
+        return saved
+    end
     local Players=game:GetService("Players")
     local player=Players.LocalPlayer
     local run=game:GetService("RunService")
@@ -201,6 +210,19 @@ return function(window,home,gameName)
     end
     window:Connect(window.main:GetPropertyChangedSignal("AbsoluteSize"),syncChrome)
     syncChrome()
+    local library=window:CreateTab({name="Library",icon="library",neglectSelector=true})
+    library:CreateSection({name="SUPPORTED GAMES"})
+    for _,name in ipairs({"Bloxstrike","Assassin!"})do
+        library:CreateText({name=name,text=(name==gameName and "Active in this session" or "Supported").." · Separate saved settings"})
+    end
+    local libraryButton=make("ImageButton",{Name="BloxSenseLibrary",Image="",BackgroundTransparency=1,
+        Position=UDim2.new(1,-170,0.5,-12),Size=UDim2.fromOffset(24,24),ImageColor3=muted,ZIndex=15},window.topbar)
+    hubBranding.DrawIcon(window,{name="Library",topbarItemIcon=libraryButton})
+    window:Connect(libraryButton.MouseButton1Click,function()library:Select()end)
+    window:Connect(libraryButton.MouseEnter,function()
+        tooltip.Text="Library";tooltip.Position=UDim2.new(1,-240,0,window.layout.topbarHeight);tooltip.Visible=true
+    end)
+    window:Connect(libraryButton.MouseLeave,function()tooltip.Visible=false end)
     for _,tab in ipairs(window.tabs)do
         if not tab.neglectSelector then
             hubBranding.DrawIcon(window,tab)
@@ -271,7 +293,7 @@ return function(window,home,gameName)
     line(games,89)
     row(games,"Assassin!",gameName=="Assassin!" and "Active" or "Available",101)
     button(support,"Supported games",UDim2.fromOffset(16,0),133,UDim2.new(0.5,-22,0,33),function()
-        message("Bloxstrike and Assassin! are included. The hub selects the correct adapter when you run it in either game.")
+        library:Select()
     end)
     button(support,"Open visuals",UDim2.new(0.5,6,0,0),133,UDim2.new(0.5,-22,0,33),function()
         for _,tab in ipairs(window.tabs)do if tab.name=="Visuals"then tab:Select();return end end
@@ -307,7 +329,9 @@ return function(Window, tab, gameName)
     local run=game:GetService("RunService")
     local player=game:GetService("Players").LocalPlayer
     local stats=game:GetService("Stats")
-    local state={Enabled=false,FPS=true,Ping=true,Delay=true,Game=true,Position="Top right",Scale=100,Opacity=15,Color=Color3.new(1,1,1)}
+    local state={Enabled=false,FPS=true,Ping=true,Delay=true,Game=true,Title="BloxSense",MetricColors=true,
+        Good=Color3.fromRGB(102,225,157),Warning=Color3.fromRGB(255,200,95),Bad=Color3.fromRGB(255,101,111),
+        Position="Top right",Scale=100,Opacity=15,Color=Color3.new(1,1,1)}
     local env=getgenv()
     env.BloxSenseWatermarkPreferences=env.BloxSenseWatermarkPreferences or {}
     local saved=env.BloxSenseWatermarkPreferences[gameName]
@@ -319,7 +343,7 @@ return function(Window, tab, gameName)
     panel.Name="Watermark";panel.AutomaticSize=Enum.AutomaticSize.XY;panel.Size=UDim2.fromOffset(0,0)
     panel.BackgroundColor3=Color3.fromRGB(15,15,17);panel.BorderSizePixel=0
     panel.Font=Enum.Font.GothamMedium;panel.TextSize=12;panel.TextColor3=state.Color;panel.Text="BloxSense"
-    panel.Parent=gui
+    panel.RichText=true;panel.Parent=gui
     local corner=Instance.new("UICorner");corner.CornerRadius=UDim.new(0,8);corner.Parent=panel
     local stroke=Instance.new("UIStroke");stroke.ApplyStrokeMode=Enum.ApplyStrokeMode.Border;stroke.Color=Color3.fromRGB(65,65,70);stroke.Thickness=1;stroke.Parent=panel
     local pad=Instance.new("UIPadding");pad.PaddingLeft=UDim.new(0,12);pad.PaddingRight=UDim.new(0,12);pad.PaddingTop=UDim.new(0,9);pad.PaddingBottom=UDim.new(0,9);pad.Parent=panel
@@ -341,6 +365,29 @@ return function(Window, tab, gameName)
     tab:CreateSlider({name="Scale (%)",flag="BloxSenseWatermarkScale",range={70,150},value=state.Scale,increment=5,callback=function(value)state.Scale=value;style()end})
     tab:CreateSlider({name="Background transparency (%)",flag="BloxSenseWatermarkOpacity",range={0,100},value=state.Opacity,increment=1,callback=function(value)state.Opacity=value;style()end})
     tab:CreateColorPicker({name="Text color",flag="BloxSenseWatermarkColor",color=state.Color,callback=function(value)state.Color=value;style()end})
+    tab:CreateInput({name="Custom title",flag="BloxSenseWatermarkTitle",value=state.Title,placeholder="BloxSense",
+        callback=function(value)state.Title=tostring(value):sub(1,64)end})
+    tab:CreateToggle({name="Color performance readings",flag="BloxSenseWatermarkMetricColors",value=state.MetricColors,
+        callback=function(value)state.MetricColors=value end})
+    for _,key in ipairs({"Good","Warning","Bad"})do
+        tab:CreateColorPicker({name=key.." reading color",flag="BloxSenseWatermark"..key,color=state[key],callback=function(value)state[key]=value end})
+    end
+    local function escape(value)
+        return (tostring(value):gsub("&","&amp;"):gsub("<","&lt;"):gsub(">","&gt;"):gsub('"',"&quot;"))
+    end
+    local function metric(text,grade)
+        if not state.MetricColors then return text end
+        return '<font color="#'..state[grade]:ToHex()..'">'..text..'</font>'
+    end
+    local function formatReadings(fps,ping,frame)
+        local segments={}
+        if state.Title~="" then table.insert(segments,escape(state.Title))end
+        if state.Game then table.insert(segments,escape(gameName))end
+        if state.FPS then table.insert(segments,metric(string.format("%d FPS",math.floor(fps+0.5)),fps<60 and "Bad" or "Good"))end
+        if state.Ping then table.insert(segments,ping and metric(string.format("%.0f ms ping",ping),ping<50 and "Good" or ping<100 and "Warning" or "Bad") or "Ping N/A")end
+        if state.Delay then table.insert(segments,metric(string.format("%.1f ms frame",frame),frame<=1000/60 and "Good" or frame<=1000/30 and "Warning" or "Bad"))end
+        return table.concat(segments,"  ·  ")
+    end
     local elapsed,frames,ping=0,0,nil
     local connection=run.RenderStepped:Connect(function(dt)
         if not state.Enabled then elapsed,frames=0,0;return end
@@ -350,15 +397,10 @@ return function(Window, tab, gameName)
             local ok,value=pcall(function()return stats.Network.ServerStatsItem["Data Ping"]:GetValue()end)
             ping=ok and type(value)=="number" and value or nil
         end
-        local segments={"BloxSense"}
-        if state.Game then table.insert(segments,gameName)end
-        if state.FPS then table.insert(segments,string.format("%d FPS",math.floor(frames/elapsed+0.5)))end
-        if state.Ping then table.insert(segments,ping and string.format("%.0f ms ping",ping) or "Ping N/A")end
-        if state.Delay then table.insert(segments,string.format("%.1f ms frame",elapsed/frames*1000))end
-        panel.Text=table.concat(segments,"  ·  ");elapsed,frames=0,0
+        panel.Text=formatReadings(frames/elapsed,ping,elapsed/frames*1000);elapsed,frames=0,0
     end)
     style()
-    return {State=state,Gui=gui,Refresh=style,Destroy=function()connection:Disconnect();gui:Destroy()end}
+    return {State=state,Gui=gui,Refresh=style,Format=formatReadings,Destroy=function()connection:Disconnect();gui:Destroy()end}
 end
 
 end)()
@@ -375,9 +417,17 @@ return function(context)
     local connections,muted={},{ }
     local tool,baseTransparency,animations
     local held,pending,lastSent=false,nil,-math.huge
+    local hiddenDecoration,restoreAt
     local destroyed=false
     local module={Ready=false}
+    local function restoreKnife()
+        if hiddenDecoration and hiddenDecoration.Parent and hiddenDecoration.Transparency==1 and baseTransparency then
+            hiddenDecoration.Transparency=baseTransparency
+        end
+        hiddenDecoration,restoreAt=nil,nil
+    end
     local function restoreInput()
+        restoreKnife()
         for _,connection in ipairs(muted)do pcall(function()connection:Enable()end)end
         table.clear(muted);module.Ready=false;held=false;pending=nil
         tool,baseTransparency,animations=nil,nil,nil
@@ -443,6 +493,9 @@ return function(context)
     table.insert(connections,released.OnClientEvent:Connect(function(_,_,owner)
         if owner~=player or not pending or not S.InstantThrow then return end
         pending=nil;S.ThrowConfirmed+=1;S.ThrowStatus="Throw confirmed"
+        local handle=tool and tool:FindFirstChild("Handle")
+        hiddenDecoration=handle and handle:FindFirstChild("KnifeDecorationHandle")
+        restoreAt=clock()+1 -- The replaced native input handler normally restores this after one second.
         if animations then pcall(function()animations.ThrowCharge:Stop();animations.Throw:Play(0.1,1,3)end)end
     end))
     table.insert(connections,input.InputBegan:Connect(function(event,processed)
@@ -463,6 +516,7 @@ return function(context)
         if scan>=0.2 then scan%=0.2;module:Refresh()end
         if elapsed<1/60 then return end;elapsed%=1/60
         local now=clock()
+        if restoreAt and now>=restoreAt then restoreKnife()end
         if pending and now-pending>1.5 then
             pending=nil;held=false;S.ThrowStatus="No release confirmed; server may be limiting throws"
         end
@@ -1250,8 +1304,7 @@ return function(context)
             and (part.Position - workspace.CurrentCamera.CFrame.Position).Magnitude <= self.MaxDistance
     end
     function module:RegionSize(part)
-        if self.Sizing=="Multiplier"then return part.Size*math.clamp(self.Scale,1,4)end
-        local size=math.clamp(self.Size,1,100)
+        local size=math.clamp(self.Size,1,10)
         return Vector3.new(size,size,size)
     end
     -- Oriented-box intersection in part space. The visible mesh and physics stay unchanged.
@@ -1380,12 +1433,8 @@ return function(context)
         Description = "Invisible hit regions; character models keep their normal size. Server acceptance is unverified.", Default = false})
     module.Toggle = toggle
     toggle:OnChanged(function() module.Enabled = toggle.Value; module:Refresh() end)
-    context.Tab.Raw:CreateDropdown({name="Sizing",flag="BloxSenseRegionSizing",options={"Studs","Multiplier"},value={"Studs"},multiSelect=false,
-        callback=function(value)module.Sizing=type(value)=="table" and value[1] or value;module:Update()end})
-    context.Tab:AddSlider("BloxSenseRegionSize",{Title="Size (studs)",Default=4,Min=1,Max=100,Rounding=0,
-        Callback=function(value)module.Size=value;module:Update()end})
-    context.Tab:AddSlider("BloxSenseHitboxScale", {Title = "Size multiplier", Default = 2,
-        Min = 1, Max = 4, Rounding = 1, Callback = function(value) module.Scale = value; module:Update() end})
+    context.Tab:AddSlider("BloxSenseRegionSize",{Title="Size (studs)",Default=4,Min=1,Max=10,Rounding=0,
+        Callback=function(value)module.Size=math.clamp(value,1,10);module:Update()end})
     local parts = context.Tab:AddDropdown("BloxSenseHitboxParts", {Title = "Body parts",
         Values = {"Head", "UpperTorso", "LowerTorso", "LeftUpperArm", "RightUpperArm", "LeftUpperLeg", "RightUpperLeg"}, Default = {"Head"}})
     parts:OnChanged(function(value)
@@ -1418,7 +1467,6 @@ return function(context)
         if connection then connection:Disconnect(); connection = nil end
         self:RestoreAll()
         if bullet.create == createWrapper then bullet.create = originalCreate end
-        gui:Destroy()
     end
     return module
 end
@@ -2645,32 +2693,15 @@ return function(context)
         end
     end
     table.insert(connections,workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(watchEffects));watchEffects()
-    local gui=Instance.new("ScreenGui");gui.Name="BloxSensePerformance";gui.ResetOnSpawn=false;gui.DisplayOrder=80;gui.Enabled=false;gui.Parent=player.PlayerGui
-    local label=Instance.new("TextLabel");label.Name="Counter";label.AnchorPoint=Vector2.new(1,0);label.Position=UDim2.new(1,-16,0,12)
-    label.Size=UDim2.fromOffset(170,28);label.BackgroundColor3=THEME.Box;label.BackgroundTransparency=0.15;label.BorderSizePixel=0
-    label.TextColor3=THEME.Text;label.Font=THEME.Font;label.TextSize=12;label.Parent=gui
-    Instance.new("UICorner",label).CornerRadius=UDim.new(0,7)
-    local badge=context.Tab:AddToggle("BloxSensePerformance",{Title="FPS and ping counter",Default=false})
-    badge:OnChanged(function()gui.Enabled=badge.Value end)
-    local elapsed,frames=0,0
-    local binding="BloxSenseCameraQoL"
-    run:BindToRenderStep(binding,Enum.RenderPriority.Last.Value,function(dt)
-        elapsed+=dt;frames+=1
-        if elapsed>=0.5 then
-            if gui.Enabled then label.Text=string.format("%d FPS  ·  %s ms",math.floor(frames/elapsed+0.5),tostring(player:GetAttribute("Ping") or "—"))end
-            elapsed,frames=0,0
-        end
-    end)
     function module:Destroy()
         module.AntiAfk, module.CustomFov = false, false
         if cameraController.updateCameraFOV == fovWrapper then
             cameraController.updateCameraFOV = originalFov
             gameCall(originalFov, requestedFov)
         end
-        run:UnbindFromRenderStep(binding);restoreEffects()
+        restoreEffects()
         for _,connection in ipairs(connections)do connection:Disconnect()end
         if cameraEffects then cameraEffects:Disconnect()end
-        gui:Destroy()
     end
     return module
 end
@@ -3275,7 +3306,7 @@ Window.Unload = function(self)
     if not self.unloaded then originalUnload(self) end
 end
 aimB:Select(true)
-local controller = { Toggle = espToggle, Container = espFolder, Cleanup = cleanup, Modules = featureModules, Window = Window, SetMenuVisible = setUI }
+local controller = { Game = "Bloxstrike", Toggle = espToggle, Container = espFolder, Cleanup = cleanup, Modules = featureModules, Window = Window, SetMenuVisible = setUI }
 environment.BloxSenseController = controller
 local runtime = Instance.new("BindableFunction")
 runtime.Name = "BloxSenseRuntime"
@@ -3287,6 +3318,10 @@ runtime.OnInvoke = function(command)
     end
 end
 runtime.Parent = espFolder
+local configOK,configResult=pcall(function()return Window:Load()end)
+if not configOK then warn("BloxSense: config could not load: "..tostring(configResult))end
+hubTab:Select(true)
+Window:Show()
 return controller
 
 end
@@ -3341,6 +3376,8 @@ end
 local connections,drawings,regions,projectiles,threats,skinRecords={},{},{},{},{},{}
 local cosmeticRecords,knifeDrawings={},{}
 local target,selectedAim,selectedRegion
+local modeName="Classic"
+local modeOpponents={}
 local preparedThrow
 local measuredSpeed
 local alertTimes={}
@@ -3428,6 +3465,36 @@ local function refreshTarget()
     local ui=targetUI();local text=ui and ui:FindFirstChild("TargetText")
     setTarget(ui and ui.Visible and text and Players:FindFirstChild(text.Text) or nil)
 end
+local function refreshMode()
+    local screen=Player.PlayerGui:FindFirstChild("ScreenGui")
+    local ui=screen and screen:FindFirstChild("UI")
+    local heading=ui and ui:FindFirstChild("textD")
+    local mode=heading and heading:FindFirstChild("Gamemode")
+    local text=mode and mode:FindFirstChild("textD")
+    local message=ui and ui:FindFirstChild("GamemodeMessage")
+    local messageText=message and message:FindFirstChild("textD")
+    local spectate=RS:FindFirstChild("CurrentSpectateGrabRemote")
+    local names={JuggernautSpectate="Juggernaut",InfectionSpectate="Infection",ClassicSpectate="Classic",FFASpectate="Free For All"}
+    modeName=text and text.Text~="" and text.Text
+        or messageText and messageText.Text~="" and messageText.Text
+        or (spectate and names[spectate.Value]) or "Classic"
+end
+connect(RS.Remotes.ResetClientEndRound.OnClientEvent,function()table.clear(modeOpponents)end)
+connect(RS.Remotes.SetNonTargetMode.OnClientEvent,function(list)
+    table.clear(modeOpponents)
+    if type(list)=="table"then for _,p in pairs(list)do if typeof(p)=="Instance" and p:IsA("Player")then modeOpponents[p]=true end end end
+end)
+local function markedJuggernaut(p)
+    -- Only explicit role markers count; a purple cosmetic alone is not a role assignment.
+    for _,object in ipairs({p,character(p)})do
+        if object then for _,name in ipairs({"Juggernaut","IsJuggernaut"})do
+            if object:GetAttribute(name)==true then return true end
+            local flag=object:FindFirstChild(name)
+            if flag and flag:IsA("BoolValue") and flag.Value then return true end
+        end end
+    end
+    return false
+end
 connect(RS.Remotes.UpdateTarget.OnClientEvent,setTarget)
 connect(RS.Remotes.HideTarget.OnClientEvent,function()setTarget(nil);table.clear(threats)end)
 connect(RS.Remotes.DoThrowKnife.OnClientEvent,function(id,_orientation,owner)
@@ -3445,6 +3512,11 @@ local function combatActive()
         and (Window.hidden or Window.minimised) and not Input:GetFocusedTextBox()
 end
 local function role(p)
+    if modeName=="Juggernaut" then
+        if markedJuggernaut(p)then return "JUGGERNAUT",Color3.fromRGB(170,80,255)end
+        if p==target then return "YOUR TARGET · JUGGERNAUT ROUND",S.UseRoleColors and S.TargetColor or S.PlayerColor end
+        return "JUGGERNAUT ROUND",S.PlayerColor
+    end
     if p==target then return "YOUR TARGET",S.UseRoleColors and S.TargetColor or S.PlayerColor end
     if (threats[p] or 0)>os.clock()then return "INCOMING KNIFE",S.UseRoleColors and S.ThreatColor or S.PlayerColor end
     local own,other=character(Player),character(p)
@@ -3456,12 +3528,13 @@ local function role(p)
             return "LOOKING TOWARD YOU",Color3.fromRGB(255,202,104)
         end
     end
+    if modeName~="Classic"then return string.upper(modeName)..(modeOpponents[p] and " · OPPONENT" or ""),S.PlayerColor end
     return "PLAYER",S.PlayerColor
 end
 local function allowed(p)
     if p==Player or not alive(p)then return false end
-    if S.AimScope=="All players"then return true end
-    return p==target or (S.AimScope=="Target + incoming threats" and (threats[p] or 0)>os.clock())
+    if S.AimScope=="All players" or modeName=="Free For All" or modeName=="Deathmatch"then return true end
+    return p==target or modeOpponents[p]==true or (S.AimScope=="Target + incoming threats" and (threats[p] or 0)>os.clock())
 end
 local gui=make("ScreenGui",{Name="BloxSenseAssassin",IgnoreGuiInset=true,ResetOnSpawn=false,DisplayOrder=70},Player.PlayerGui)
 local fov=make("Frame",{Name="AimRadius",AnchorPoint=Vector2.new(0.5,0.5),BackgroundTransparency=1,Size=UDim2.fromOffset(300,300)},gui)
@@ -3521,7 +3594,6 @@ local function visible(part,origin,point)
     return not hit or hit.Instance:IsDescendantOf(part.Parent)
 end
 local function regionSize(part)
-    if S.RegionSizing=="Multiplier"then return part.Size*math.clamp(S.Scale,1,4)end
     local size=math.clamp(S.RegionSize,1,100)
     return Vector3.new(size,size,size)
 end
@@ -3899,9 +3971,7 @@ toggle(b,"Expand","Expanded aim regions")
 local regionControls,displayControls=columns(b)
 regionControls:CreateSection({name="SELECTION"})
 dropdown(regionControls,"RegionPart","Body part",{"Head","UpperTorso","Torso","HumanoidRootPart"})
-dropdown(regionControls,"RegionSizing","Sizing",{"Studs","Multiplier"})
 slider(regionControls,"RegionSize","Size (studs)",1,100,1)
-slider(regionControls,"Scale","Multiplier",1,4,0.1)
 displayControls:CreateSection({name="DISPLAY"})
 toggle(displayControls,"ShowRegions","Show regions");slider(displayControls,"RegionOpacity","Opacity (%)",5,70)
 colorPicker(displayControls,"RegionColor","Region color")
@@ -4103,7 +4173,7 @@ local function step(dt)
         local distance=(root.Position-camera.CFrame.Position).Magnitude
         if distance>S.ESPDistance then d.Box.Visible=false;d.Highlight.Enabled=false;d.Low=nil;continue end
         local title,color=role(p)
-        local priority=title=="YOUR TARGET" or title=="INCOMING KNIFE"
+        local priority=p==target or modeOpponents[p] or title=="JUGGERNAUT" or (threats[p] or 0)>now
         if S.ESP and (not S.OnlyPriority or priority)then
             local low,size=bounds(c,camera)
             if low then
@@ -4156,7 +4226,7 @@ end)
 local slow=0
 connect(Run.Heartbeat,function(dt)
     slow+=dt;if slow<0.3 then return end;slow=0
-    refreshTarget();applySkin()
+    refreshTarget();refreshMode();applySkin()
 
 end)
 local action=game:GetService("ContextActionService")
@@ -4189,7 +4259,11 @@ local controller={Game="Assassin!",Window=Window,State=S,Cleanup=cleanup,Telemet
         ApplySkin=applySkin,RestoreSkins=restoreSkins,Step=step,SetTarget=setTarget,GetTarget=function()return target end,Role=role,SupportedSkin=supportedSkin,InterceptTime=interceptTime,PredictedPoint=predictedPoint,PrepareThrow=prepareThrow,UpdateKnifeESP=updateKnifeESP,RegionSize=regionSize,RaycastCount=function()return raycastCount end}}
 env.BloxSenseController=controller
 applyHubDashboard(Window,tabs.Hub,"Assassin!")
-refreshTarget();applySkin()
+-- Load after callbacks and modules exist; early native autoload can miss wrapper listeners.
+local configOK,configResult=pcall(function()return Window:Load()end)
+if not configOK then warn("BloxSense: config could not load: "..tostring(configResult))end
+S.RegionSizing="Studs"
+refreshTarget();refreshMode();applySkin()
 Window:Show()
 notify("BloxSense Hub","Assassin! loaded. Press L to open or close the menu.")
 return controller
